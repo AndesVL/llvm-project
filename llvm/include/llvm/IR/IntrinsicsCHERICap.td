@@ -12,6 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 
+def int_cheri_cap_uninit_get :
+  Intrinsic<[llvm_anyint_ty],
+            [llvm_fatptr_ty],
+            [IntrNoMem]>;
+def int_cheri_cap_uninit_set :
+  Intrinsic<[llvm_fatptr_ty],
+            [llvm_fatptr_ty, llvm_anyint_ty],
+            [IntrNoMem]>;
 def int_cheri_cap_length_get :
   Intrinsic<[llvm_anyint_ty],
             [llvm_fatptr_ty],
