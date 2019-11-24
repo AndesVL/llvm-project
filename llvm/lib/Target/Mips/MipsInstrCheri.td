@@ -360,7 +360,7 @@ def CClearTag  : CheriFmt2Op<0xb, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
                               [(set CheriOpnd:$r1, (int_cheri_cap_tag_clear CheriOpnd:$r2))]>;
 def CSetAddr : CheriFmtCSet<0x22, "addr", "address">;
 
-def CUninit  : CheriFmt2Op<0x14, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
+def CUninit  : CheriFmt2Op<0x1b, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
                               "cuninit\t$r1, $r2",
                               [(set CheriOpnd:$r1, (int_cheri_cap_uninit CheriOpnd:$r2))]>;
 
