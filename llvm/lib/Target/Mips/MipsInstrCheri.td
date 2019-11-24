@@ -353,13 +353,16 @@ def CAndPerms  : CheriFmtCSet<0xd, "perm", "perms", "and">;
 def CSetFlags  : CheriFmtCSet<0xe, "flags">;
 def CSetOffset : CheriFmtCSet<0xf, "offset">;
 def CSetBounds : CheriFmtCSet<0x8, "bounds">;
-def CUninit  : CheriFmtCSet<0x25, "uninit">;      //  TODO
 def CSetBoundsExact : CheriFmtCSet<0x9, "boundsexact", "bounds", "set", "set_exact">;
 def CIncOffset : CheriFmtCSet<0x11, "offset", "offset", "inc", "increment">;
 def CClearTag  : CheriFmt2Op<0xb, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
                               "ccleartag\t$r1, $r2",
                               [(set CheriOpnd:$r1, (int_cheri_cap_tag_clear CheriOpnd:$r2))]>;
 def CSetAddr : CheriFmtCSet<0x22, "addr", "address">;
+
+def CUninit  : CheriFmt2Op<0x14, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
+                              "cuninit\t$r1, $r2",
+                              [(set CheriOpnd:$r1, (int_cheri_cap_uninit CheriOpnd:$r2))]>;
 
 // CRoundRepresentableLength (a.k.a. CRoundArchitecturalPrecision)
 def CRAP : CheriFmt2Op<0x10, (outs GPR64Opnd:$r1), (ins GPR64Opnd:$r2),
