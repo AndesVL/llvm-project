@@ -527,6 +527,9 @@ let Predicates = [IsCHERI], DecoderNamespace="CHERI" in {
 def STORECAP : CheriFmtCLS<0x3e, (outs), (ins CheriOpnd:$cs, GPR64Opnd:$rt, simm11s4:$offset, CheriOpnd0IsDDC:$cb),
                          "csc\t$cs, ${rt}, ${offset}(${cb})",
                          [(store CheriOpnd:$cs, (add (add GPR64Opnd:$rt, (ptrtoint CheriOpnd0IsDDC:$cb)), (i64 simm11s4Pattern:$offset)))]>;
+def UNINITSTORECAP : CheriFmtCLS<0x3c, (outs CheriOpnd:$ct), (ins CheriOpnd:$cs, simm11s4:$offset, CheriOpnd0IsDDC:$cb),
+                         "ucsc\t$ct, $cs, ${offset}(${cb})",
+                         [(set CheriOpnd:$ct, (store CheriOpnd:$cs, (add (ptrtoint CheriOpnd0IsDDC:$cb), (i64 simm11s4Pattern:$offset))))]>;
 // new experimental 16bit immediate CLC (not sure if needed but added for symmetry with clc)
 // Reuses the MDMX/MSA opcodes
 def STORECAP_BigImm : CheriFmtCLS_BigImm<0x1E, (outs), (ins CheriOpnd:$cs, simm16s4:$offset, CheriOpnd0IsDDC:$cb),
@@ -591,6 +594,16 @@ multiclass StoreViaCap0<Instruction Op, RegisterOperand RC, PatFrag storeType> {
             (Op RC:$rd, GPR64Opnd:$rt, (i64 0), CheriOpnd0IsDDC:$cb)>;
 }
 
+multiclass UStoreViaCapScaled<bits<2> t, bit e, string instr_asm, RegisterOperand RC, PatFrag storeType, Operand simm, PatFrag immfrag> {
+  def #NAME# : CheriFmtUCSX<t, e,
+                             (outs CheriOpnd:$ct),
+                             (ins RC:$rs, simm:$offset, CheriOpnd0IsDDC:$cb),
+                             !strconcat(instr_asm, "\t$ct, ${rs}, ${offset}(${cb})"),
+                           [(set CheriOpnd:$ct, (storeType (CapRegType (ptradd CheriOpnd0IsDDC:$cb, (i64 immfrag:$offset))), RC:$rs))]>;
+}
+multiclass UStoreViaCap<bits<2> t, bit e, string instr_asm, RegisterOperand RC, PatFrag storeType> :
+  UStoreViaCapScaled<t, e, instr_asm, RC, storeType, simm8, immSExt8>;
+
 let isCodeGenOnly = 1 in {
 defm CAPLOAD832    : LoadViaCap<0, 1, "clb", GPR32Opnd, sextloadi8>;
 defm CAPLOADU832   : LoadViaCap<0, 0, "clbu", GPR32Opnd, extloadi8>;
@@ -641,6 +654,16 @@ let isCodeGenOnly=1 in {
   defm CAPSTORE3264     : StoreViaCapScaled<2, 0, "csw", GPR64Opnd, truncstorei32, simm8s2, simm8s2Pattern>;
 }
 defm CAPSTORE64     : StoreViaCapScaled<3, 0, "csd", GPR64Opnd, store, simm8s3, simm8s3Pattern>;
+
+defm UCAPSTORE8      : UStoreViaCap<0, 0, "ucsb", GPR64Opnd, truncstorei8>;
+defm UCAPSTORE16     : UStoreViaCapScaled<1, 0, "ucsh", GPR64Opnd, truncstorei16, simm8s1, simm8s1Pattern>;
+defm UCAPSTORE32     : UStoreViaCapScaled<2, 0, "ucsw", GPR32Opnd, store, simm8s2, simm8s2Pattern>;
+let isCodeGenOnly=1 in {
+  defm UCAPSTORE832      : UStoreViaCap<0, 0, "ucsb", GPR32Opnd, truncstorei8>;
+  defm UCAPSTORE1632     : UStoreViaCapScaled<1, 0, "ucsh", GPR32Opnd, truncstorei16, simm8s1, simm8s1Pattern>;
+  defm UCAPSTORE3264     : UStoreViaCapScaled<2, 0, "ucsw", GPR64Opnd, truncstorei32, simm8s2, simm8s2Pattern>;
+}
+defm UCAPSTORE64     : UStoreViaCapScaled<3, 0, "ucsd", GPR64Opnd, store, simm8s3, simm8s3Pattern>;
 
 // TODO: replace these by CReadHwr
 def : Pat<(int_cheri_ddc_get), (CReadHwr CAPHWR0)>;

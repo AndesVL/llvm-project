@@ -201,6 +201,25 @@ class CheriFmtCLX<bits<2> t, bits<1> e, dag outs, dag ins, string asmstr,
   let hasSideEffects = 0;
 }
 
+class CheriFmtUCSX<bits<2> t, bits<1> e, dag outs, dag ins, string asmstr,
+                list<dag> pattern> :
+  MipsInst<outs, ins, asmstr, pattern, NoItinerary, FrmOther>, Sched<[]>
+{
+  bits<5>  ct;
+  bits<5>  rs;
+  bits<5>  cb;
+  bits<8>  offset;
+
+  let Opcode = 0x3b;
+  let Inst{25-21} = ct;
+  let Inst{20-16} = rs;
+  let Inst{15-11} = cb;
+  let Inst{10-3}  = offset;
+  let Inst{2}     = e;
+  let Inst{1-0}   = t;
+  let hasSideEffects = 1;
+}
+
 class CheriFmtCSX<bits<2> t, bits<1> e, dag outs, dag ins, string asmstr,
                 list<dag> pattern> :
   MipsInst<outs, ins, asmstr, pattern, NoItinerary, FrmOther>, Sched<[]>
