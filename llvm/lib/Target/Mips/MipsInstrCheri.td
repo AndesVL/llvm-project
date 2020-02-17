@@ -269,7 +269,7 @@ def CGetSealed : CheriFmt2Op<5, (outs GPR64Opnd:$r1), (ins CheriOpnd:$r2),
 def CGetOffset : CheriFmtCGet<6, "offset">;
 def CGetAddr   : CheriFmtCGet<0xf, "addr", "address">;
 def CGetFlags  : CheriFmtCGet<0x12, "flags">;
-def CGetUninit : CheriFmtCGet<0x13, "uninit">;
+def CGetUninit : CheriFmtCGet<0x15, "uninit">;
 
 // Versions of property setters that take immediate operands
 // We allow CIncOffset $c1, 10 as an alias for CIncOffset $c1, $c1, 10, and the same for CSetBounds
