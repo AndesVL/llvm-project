@@ -380,6 +380,19 @@ TEST(STLExtrasTest, EmptyTest) {
   EXPECT_FALSE(llvm::empty(R1));
 }
 
+TEST(STLExtrasTest, DropBeginTest) {
+  SmallVector<int, 5> vec{0, 1, 2, 3, 4};
+
+  for (int n = 0; n < 5; ++n) {
+    int i = n;
+    for (auto &v : drop_begin(vec, n)) {
+      EXPECT_EQ(v, i);
+      i += 1;
+    }
+    EXPECT_EQ(i, 5);
+  }
+}
+
 TEST(STLExtrasTest, EarlyIncrementTest) {
   std::list<int> L = {1, 2, 3, 4};
 
@@ -451,7 +464,7 @@ TEST(STLExtrasTest, to_address) {
   EXPECT_EQ(V1, to_address(V1));
 
   // Check fancy pointer overload for unique_ptr
-  std::unique_ptr<int> V2 = make_unique<int>(0);
+  std::unique_ptr<int> V2 = std::make_unique<int>(0);
   EXPECT_EQ(V2.get(), to_address(V2));
 
   V2.reset(V1);
@@ -469,25 +482,14 @@ TEST(STLExtrasTest, to_address) {
   EXPECT_EQ(V1, to_address(V3));
 }
 
-TEST(STLExtrasTest, bsearch) {
-  // Integer version.
-  EXPECT_EQ(7u, bsearch(5, 10, [](unsigned X) { return X >= 7; }));
-  EXPECT_EQ(5u, bsearch(5, 10, [](unsigned X) { return X >= 1; }));
-  EXPECT_EQ(10u, bsearch(5, 10, [](unsigned X) { return X >= 50; }));
-
-  // Iterator version.
+TEST(STLExtrasTest, partition_point) {
   std::vector<int> V = {1, 3, 5, 7, 9};
-  EXPECT_EQ(V.begin() + 3,
-            bsearch(V.begin(), V.end(), [](unsigned X) { return X >= 7; }));
-  EXPECT_EQ(V.begin(),
-            bsearch(V.begin(), V.end(), [](unsigned X) { return X >= 1; }));
-  EXPECT_EQ(V.end(),
-            bsearch(V.begin(), V.end(), [](unsigned X) { return X >= 50; }));
 
   // Range version.
-  EXPECT_EQ(V.begin() + 3, bsearch(V, [](unsigned X) { return X >= 7; }));
-  EXPECT_EQ(V.begin(), bsearch(V, [](unsigned X) { return X >= 1; }));
-  EXPECT_EQ(V.end(), bsearch(V, [](unsigned X) { return X >= 50; }));
+  EXPECT_EQ(V.begin() + 3,
+            partition_point(V, [](unsigned X) { return X < 7; }));
+  EXPECT_EQ(V.begin(), partition_point(V, [](unsigned X) { return X < 1; }));
+  EXPECT_EQ(V.end(), partition_point(V, [](unsigned X) { return X < 50; }));
 }
 
 } // namespace

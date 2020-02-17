@@ -31,6 +31,7 @@ void freebsd::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
                                       const char *LinkingOutput) const {
   claimNoWarnArgs(Args);
   ArgStringList CmdArgs;
+  const auto &D = getToolChain().getDriver();
 
   // When building 32-bit code on FreeBSD/amd64, we have to explicitly
   // instruct as in the base system to assemble 32-bit code.
@@ -105,6 +106,19 @@ void freebsd::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
   }
   }
 
+  for (const Arg *A : Args.filtered(options::OPT_ffile_prefix_map_EQ,
+                                    options::OPT_fdebug_prefix_map_EQ)) {
+    StringRef Map = A->getValue();
+    if (Map.find('=') == StringRef::npos)
+      D.Diag(diag::err_drv_invalid_argument_to_option)
+          << Map << A->getOption().getName();
+    else {
+      CmdArgs.push_back(Args.MakeArgString("--debug-prefix-map"));
+      CmdArgs.push_back(Args.MakeArgString(Map));
+    }
+    A->claim();
+  }
+
   Args.AddAllArgValues(CmdArgs, options::OPT_Wa_COMMA, options::OPT_Xassembler);
 
   CmdArgs.push_back("-o");
@@ -114,7 +128,7 @@ void freebsd::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(II.getFilename());
 
   const char *Exec = Args.MakeArgString(getToolChain().GetProgramPath("as"));
-  C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+  C.addCommand(std::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
 }
 
 void freebsd::Linker::ConstructJob(Compilation &C, const JobAction &JA,
@@ -190,16 +204,12 @@ void freebsd::Linker::ConstructJob(Compilation &C, const JobAction &JA,
       CmdArgs.push_back("-Bshareable");
     } else {
       CmdArgs.push_back("-dynamic-linker");
-      if (IsCHERIPureCapABI)
-        CmdArgs.push_back("/libexec/ld-cheri-elf.so.1");
-      else
-        CmdArgs.push_back("/libexec/ld-elf.so.1");
+      CmdArgs.push_back("/libexec/ld-elf.so.1");
     }
-    if (ToolChain.getTriple().getOSMajorVersion() >= 9) {
-      if (Arch == llvm::Triple::arm || Arch == llvm::Triple::sparc ||
-          Arch == llvm::Triple::x86 || Arch == llvm::Triple::x86_64) {
+    const llvm::Triple &T = ToolChain.getTriple();
+    if (T.getOSMajorVersion() >= 9) {
+      if (Arch == llvm::Triple::arm || Arch == llvm::Triple::sparc || T.isX86())
         CmdArgs.push_back("--hash-style=both");
-      }
     }
     CmdArgs.push_back("--enable-new-dtags");
   }
@@ -239,6 +249,14 @@ void freebsd::Linker::ConstructJob(Compilation &C, const JobAction &JA,
       CmdArgs.push_back("elf32ltsmipn32_fbsd");
     else
       CmdArgs.push_back("elf64ltsmip_fbsd");
+    break;
+  case llvm::Triple::riscv32:
+    CmdArgs.push_back("-m");
+    CmdArgs.push_back("elf32lriscv");
+    break;
+  case llvm::Triple::riscv64:
+    CmdArgs.push_back("-m");
+    CmdArgs.push_back("elf64lriscv");
     break;
   default:
     break;
@@ -312,7 +330,11 @@ void freebsd::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
 
   if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs)) {
-    addOpenMPRuntime(CmdArgs, ToolChain, Args);
+    // Use the static OpenMP runtime with -static-openmp
+    bool StaticOpenMP = Args.hasArg(options::OPT_static_openmp) &&
+                        !Args.hasArg(options::OPT_static);
+    addOpenMPRuntime(CmdArgs, ToolChain, Args, StaticOpenMP);
+
     CmdArgs.push_back("--start-group");
     if (D.CCCIsCXX()) {
       if (ToolChain.ShouldLinkCXXStdlib(Args))
@@ -386,7 +408,7 @@ void freebsd::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   ToolChain.addProfileRTLibs(Args, CmdArgs);
 
   const char *Exec = Args.MakeArgString(getToolChain().GetLinkerPath());
-  C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+  C.addCommand(std::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
   if (Args.hasFlag(options::OPT_external_capsizefix, options::OPT_no_capsizefix,
                    false) &&
       Args.hasFlag(options::OPT_cheri_linker, options::OPT_no_cheri_linker,
@@ -397,7 +419,7 @@ void freebsd::Linker::ConstructJob(Compilation &C, const JobAction &JA,
       SizeFixArgs.push_back("--verbose");
     SizeFixArgs.push_back(Output.getFilename());
     InputInfoList In= {InputInfo(types::TY_Object, Output.getFilename(), Output.getBaseInput())};
-    C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, SizeFixArgs, In));
+    C.addCommand(std::make_unique<Command>(JA, *this, Exec, SizeFixArgs, In));
   }
 }
 
@@ -406,10 +428,6 @@ void freebsd::Linker::ConstructJob(Compilation &C, const JobAction &JA,
 FreeBSD::FreeBSD(const Driver &D, const llvm::Triple &Triple,
                  const ArgList &Args)
     : Generic_ELF(D, Triple, Args) {
-
-  IsCheriPurecap =
-      Triple.getEnvironment() == llvm::Triple::CheriPurecap ||
-      (Triple.isMIPS() && tools::mips::hasMipsAbiArg(Args, "purecap"));
 
   // When targeting 32-bit platforms, look for '/usr/lib32/crt1.o' and fall
   // back to '/usr/lib' if it doesn't exist.
@@ -427,7 +445,7 @@ FreeBSD::FreeBSD(const Driver &D, const llvm::Triple &Triple,
 ToolChain::CXXStdlibType FreeBSD::GetDefaultCXXStdlibType() const {
   // Always use libc++ for CHERI purecap
   // TODO: always use libc++ for MIPS64?
-  if (getTriple().getOSMajorVersion() >= 10 || IsCheriPurecap)
+  if (getTriple().getOSMajorVersion() >= 10 || isCheriPurecap())
     return ToolChain::CST_Libcxx;
   // Always use libc++ for CHERI triples and CHERI subarch:
   if (getTriple().getArch() == llvm::Triple::cheri)
@@ -443,6 +461,12 @@ ToolChain::CXXStdlibType FreeBSD::GetDefaultCXXStdlibType() const {
     }
   }
   return ToolChain::CST_Libstdcxx;
+}
+
+unsigned FreeBSD::GetDefaultDwarfVersion() const {
+  if (getTriple().getOSMajorVersion() < 12)
+    return 2;
+  return 4;
 }
 
 void FreeBSD::addLibStdCxxIncludePaths(
@@ -468,6 +492,11 @@ void FreeBSD::AddCXXStdlibLibArgs(const ArgList &Args,
   }
 }
 
+void FreeBSD::AddCudaIncludeArgs(const ArgList &DriverArgs,
+                                 ArgStringList &CC1Args) const {
+  CudaInstallation.AddCudaIncludeArgs(DriverArgs, CC1Args);
+}
+
 Tool *FreeBSD::buildAssembler() const {
   return new tools::freebsd::Assembler(*this);
 }
@@ -490,6 +519,8 @@ llvm::ExceptionHandling FreeBSD::GetExceptionModel(const ArgList &Args) const {
 }
 
 bool FreeBSD::HasNativeLLVMSupport() const { return true; }
+
+bool FreeBSD::IsUnwindTablesDefault(const ArgList &Args) const { return true; }
 
 bool FreeBSD::isPIEDefault() const { return getSanitizerArgs().requiresPIE(); }
 
@@ -521,4 +552,15 @@ SanitizerMask FreeBSD::getSupportedSanitizers() const {
   if (IsX86_64)
     Res |= SanitizerKind::Memory;
   return Res;
+}
+
+void FreeBSD::addClangTargetOptions(const ArgList &DriverArgs,
+                                    ArgStringList &CC1Args,
+                                    Action::OffloadKind) const {
+
+  if (!DriverArgs.hasFlag(options::OPT_fuse_init_array,
+                          options::OPT_fno_use_init_array,
+                          getTriple().getOSMajorVersion() >= 12 ||
+                              getTriple().isMIPS() || isCheriPurecap()))
+    CC1Args.push_back("-fno-use-init-array");
 }

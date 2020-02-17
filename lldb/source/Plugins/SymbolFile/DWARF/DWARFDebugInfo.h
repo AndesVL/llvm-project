@@ -16,18 +16,12 @@
 #include "DWARFTypeUnit.h"
 #include "DWARFUnit.h"
 #include "SymbolFileDWARF.h"
-#include "lldb/Core/STLUtils.h"
 #include "lldb/lldb-private.h"
 #include "llvm/Support/Error.h"
 
 namespace lldb_private {
 class DWARFContext;
 }
-
-typedef std::multimap<const char *, dw_offset_t, CStringCompareFunctionObject>
-    CStringToDIEMap;
-typedef CStringToDIEMap::iterator CStringToDIEMapIter;
-typedef CStringToDIEMap::const_iterator CStringToDIEMapConstIter;
 
 class DWARFDebugInfo {
 public:
@@ -37,8 +31,8 @@ public:
                                   const dw_offset_t next_offset,
                                   const uint32_t depth, void *userData);
 
-  explicit DWARFDebugInfo(lldb_private::DWARFContext &context);
-  void SetDwarfData(SymbolFileDWARF *dwarf2Data);
+  explicit DWARFDebugInfo(SymbolFileDWARF &dwarf,
+                          lldb_private::DWARFContext &context);
 
   size_t GetNumUnits();
   DWARFUnit *GetUnitAtIndex(lldb::user_id_t idx);
@@ -65,8 +59,7 @@ public:
 protected:
   typedef std::vector<DWARFUnitSP> UnitColl;
 
-  // Member variables
-  SymbolFileDWARF *m_dwarf2Data;
+  SymbolFileDWARF &m_dwarf;
   lldb_private::DWARFContext &m_context;
   UnitColl m_units;
   std::unique_ptr<DWARFDebugAranges>

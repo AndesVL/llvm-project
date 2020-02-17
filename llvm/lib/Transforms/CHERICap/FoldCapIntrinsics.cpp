@@ -14,6 +14,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Analysis/InstructionSimplify.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Cheri.h"
 #include "llvm/IR/Constants.h"
@@ -41,12 +43,11 @@ using namespace PatternMatch;
 
 namespace {
 class CHERICapFoldIntrinsics : public ModulePass {
-  Function *IncOffset;
   Function *SetOffset;
   Function *GetOffset;
   Function *SetAddr;
   Function *GetAddr;
-  TargetLibraryInfo *TLI;
+  std::function<const TargetLibraryInfo &(Function &)> GetTLI;
 
   Type* I8CapTy;
   Type* CapAddrTy;
@@ -108,12 +109,24 @@ class CHERICapFoldIntrinsics : public ModulePass {
     foldGet(M, Intrinsic::cheri_cap_type_get, {CapSizeTy}, inferOther, -1);
   }
 
-  static Constant* getIntToPtrSourceValue(Value* V) {
+  Constant* getIntToPtrSourceValue(Value* V) {
     if (ConstantExpr* CE = dyn_cast<ConstantExpr>(V)) {
       if (CE->isCast() && CE->getOpcode() == Instruction::IntToPtr) {
         assert(CE->getNumOperands() == 1);
         Constant *Src = CE->getOperand(0);
         return Src;
+      } else if (CE->getOpcode() == Instruction::GetElementPtr && CE->getOperand(0)->isNullValue()) {
+        // GEP on null is the same as inttoptr:
+        auto GEP = cast<GEPOperator>(CE);
+        APInt Offset(CapSizeTy->getIntegerBitWidth(), 0, true);
+        if (GEP->accumulateConstantOffset(*DL, Offset)) {
+          return ConstantInt::get(CapSizeTy, Offset);
+        } else if (GEP->getNumIndices() == 1 && GEP->getOperand(1)->getType() == CapSizeTy) {
+          // also handle non-constant GEPs:
+          // XXXAR: not sure this is always profitable...
+          if (GEP->getOperand(1)->getType() == CapSizeTy)
+            return cast<Constant>(GEP->getOperand(1));
+        }
       }
     }
     return nullptr;
@@ -139,12 +152,13 @@ class CHERICapFoldIntrinsics : public ModulePass {
     // unrepresentable (which is not an issue if it is already null)
     if (match(V, m_Intrinsic<Intrinsic::cheri_cap_offset_set>(m_Value(Arg)))) {
       return inferCapabilityNonOffsetField(Arg, Call, NullValue, true);
-    } else if (match(V, m_Intrinsic<Intrinsic::cheri_cap_offset_increment>(
-                            m_Value(Arg)))) {
-      return inferCapabilityNonOffsetField(Arg, Call, NullValue, true);
     } else if (match(V, m_Intrinsic<Intrinsic::cheri_cap_address_set>(
                             m_Value(Arg)))) {
       return inferCapabilityNonOffsetField(Arg, Call, NullValue, true);
+    } else if (ConstantExpr *CE = dyn_cast<ConstantExpr>(V)) {
+      if (CE->getOpcode() == Instruction::GetElementPtr) {
+        return inferCapabilityNonOffsetField(CE->getOperand(0), Call, NullValue, true);
+      }
     }
     // TODO: is there anything else we can infer?
     return nullptr;
@@ -154,24 +168,27 @@ class CHERICapFoldIntrinsics : public ModulePass {
   Value *getOffsetIncrement(Value *V, Value **Arg) {
     if (!V)
       return nullptr;
-    Value *Offset = nullptr;
-    if (match(V, m_Intrinsic<Intrinsic::cheri_cap_offset_increment>(
-                     m_Value(*Arg), m_Value(Offset)))) {
-      return Offset;
+    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V)) {
+      SmallVector<Value *, 8> Ops(GEP->op_begin(), GEP->op_end());
+      if (Value *SimpleGEP =
+              llvm::SimplifyGEPInst(GEP->getSourceElementType(), Ops, {*DL}))
+        V = SimpleGEP;
+    }
+    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(V)) {
+      if (CE->getOpcode() == Instruction::GetElementPtr) {
+        *Arg = CE->getOperand(0);
+        return CE->getOperand(1);
+      }
     } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V)) {
       *Arg = GEP->getOperand(0);
-
-      // XXXAR: do I need the inbounds check here?
-      if (GEP->isInBounds() && GEP->getType() == I8CapTy) {
-        APInt Offset(CapSizeTy->getIntegerBitWidth(), 0, true);
-        if (GEP->accumulateConstantOffset(*DL, Offset)) {
-          return ConstantInt::get(CapSizeTy, Offset);
-        } else if (GEP->getOperand(1)->getType() == CapSizeTy) {
-          // also handle non-constant GEPs:
-          // XXXAR: not sure this is always profitable, sometimes a CIncOffset
-          // might be is better
+      APInt Offset(CapSizeTy->getIntegerBitWidth(), 0, true);
+      if (GEP->accumulateConstantOffset(*DL, Offset)) {
+        return ConstantInt::get(CapSizeTy, Offset);
+      } else if (GEP->getNumIndices() == 1 && GEP->getOperand(1)->getType() == CapSizeTy) {
+        // also handle non-constant GEPs:
+        // XXXAR: not sure this is always profitable...
+        if (GEP->getOperand(1)->getType() == CapSizeTy)
           return GEP->getOperand(1);
-        }
       }
     }
     return nullptr;
@@ -200,9 +217,8 @@ class CHERICapFoldIntrinsics : public ModulePass {
     // NULL)
     if (match(V, m_Intrinsic<Intrinsic::cheri_cap_offset_set>(
                      m_Value(Arg), m_Value(IntrinArg)))) {
-      // If we are inferring the offset a setoffset can always be used. For
-      // the address we can only infer the value if the setoffset call is on
-      // NULL
+      // If we are inferring the offset a setoffset can always be used. For the
+      // address we can only infer the value if the setoffset call is on NULL
       if (Intrin == Intrinsic::cheri_cap_offset_get ||
           isa<ConstantPointerNull>(Arg)) {
         if (BaseCap)
@@ -226,7 +242,7 @@ class CHERICapFoldIntrinsics : public ModulePass {
     // Finally we can fold inc-offset calls into the result as adds
     if (Value *Increment = getOffsetIncrement(V, &Arg)) {
       if (Value *LHS = (this->*InferOffsetOrAddr)(Arg, Call, IntTy, BaseCap)) {
-        IRBuilder<> B(cast<Instruction>(V));
+        IRBuilder<> B(Call);
         return B.CreateAdd(LHS, Increment);
       }
     }
@@ -311,7 +327,6 @@ class CHERICapFoldIntrinsics : public ModulePass {
 
   template <Intrinsic::ID GetIntrinsic, Intrinsic::ID SetIntrinsic>
   void foldSetOffsetOrSetAddress(Module *M, Function *SetFunc) {
-    assert(IncOffset && "Not initialized correclty");
     SmallVector<CallInst *, 16> SetCalls;
     SmallPtrSet<Instruction*, 8> ToErase;
     for (Value *V : SetFunc->users())
@@ -351,8 +366,7 @@ class CHERICapFoldIntrinsics : public ModulePass {
           Add = LHS;
         if (Add) {
           IRBuilder<> B(CI);
-          CallInst *Replacement = B.CreateCall(IncOffset, {BaseCap, Add});
-          Replacement->setTailCall(true);
+          Value *Replacement = B.CreateGEP(BaseCap, Add);
           LLVM_DEBUG(dbgs() << "Replacing all uses: "; CI->dump();
                      dbgs() << "New replacement: "; Replacement->dump(););
           CI->replaceAllUsesWith(Replacement);
@@ -383,36 +397,7 @@ class CHERICapFoldIntrinsics : public ModulePass {
 
     }
     for (Instruction* I : ToErase)
-      RecursivelyDeleteTriviallyDeadInstructions(I, TLI);
-  }
-
-  /// Replace set-offset, inc-offset sequences with a single set-offset
-  /// Also fold multiple inc-offsets into a single on if possible
-  void foldIncOffset() {
-    SmallVector<CallInst *, 16> IncOffsets;
-    SmallPtrSet<Instruction*, 8> ToErase;
-    for (Value *V : IncOffset->users())
-      IncOffsets.push_back(cast<CallInst>(V));
-    for (CallInst *CI : IncOffsets) {
-      if (ToErase.count(CI)) {
-        assert(CI->hasNUses(0));
-        continue;
-      }
-      // fold chains of inc-offset, (inc-offset/GEP)+ into a single inc-offset
-      foldIncOffsetSetOffsetSetAddrOnlyUserIncrement(CI, ToErase);
-
-      // Fold incoffset(A, 0) -> A since incrementing by zero doesn't do anything
-      if (match(CI->getOperand(1), m_Zero())) {
-        LLVM_DEBUG(dbgs() << "Replacing all uses: "; CI->dump();
-                   dbgs() << "New replacement: "; CI->getOperand(0)->dump(););
-        CI->replaceAllUsesWith(CI->getOperand(0));
-        ToErase.insert(CI);
-        Modified = true;
-        continue;
-      }
-    }
-    for (Instruction* I : ToErase)
-      RecursivelyDeleteTriviallyDeadInstructions(I);
+      RecursivelyDeleteTriviallyDeadInstructions(I, &GetTLI(*SetFunc));
   }
 
 public:
@@ -425,17 +410,17 @@ public:
     if (skipModule(M))
       return false;
 
-    TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+    GetTLI = [this](Function &F) -> const TargetLibraryInfo & {
+      return this->getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(F);
+    };
 
     Modified = false;
     DL = &M.getDataLayout();
     LLVMContext &C = M.getContext();
     I8CapTy = Type::getInt8PtrTy(C, 200);
-    CapAddrTy = Type::getIntNTy(C, DL->getPointerBaseSizeInBits(200));
+    CapAddrTy = Type::getIntNTy(C, DL->getPointerAddrSizeInBits(200));
     CapSizeTy = Type::getIntNTy(C, DL->getIndexSizeInBits(200));
     // Don't add these intrinsics to the module if none of them are used:
-    IncOffset = M.getFunction(
-        Intrinsic::getName(Intrinsic::cheri_cap_offset_increment, CapSizeTy));
     SetOffset =
         M.getFunction(Intrinsic::getName(Intrinsic::cheri_cap_offset_set,
                                          CapSizeTy));
@@ -451,19 +436,13 @@ public:
     // at least one intrinsic was used -> we need to run the fold
     // setoffset/incoffset pass
 
-    if (IncOffset || SetOffset || GetOffset) {
-      // Ensure that all the intrinsics exist in the module
-      if (!IncOffset)
-        IncOffset = Intrinsic::getDeclaration(
-            &M, Intrinsic::cheri_cap_offset_increment, CapSizeTy);
+    if (SetOffset || GetOffset) {
       if (!SetOffset)
         SetOffset = Intrinsic::getDeclaration(
             &M, Intrinsic::cheri_cap_offset_set, CapSizeTy);
       if (!GetOffset)
         GetOffset = Intrinsic::getDeclaration(
             &M, Intrinsic::cheri_cap_offset_get, CapSizeTy);
-      // TODO: does the order here matter?
-      foldIncOffset();
       foldSetOffset(&M);
     }
     if (SetAddr || GetAddr) {
@@ -474,9 +453,6 @@ public:
       if (!GetAddr)
         GetAddr = Intrinsic::getDeclaration(
             &M, Intrinsic::cheri_cap_address_get, CapAddrTy);
-      if (!IncOffset)
-        IncOffset = Intrinsic::getDeclaration(
-            &M, Intrinsic::cheri_cap_offset_increment, CapSizeTy);
       // TODO: does the order here matter?
       foldSetAddress(&M);
     }

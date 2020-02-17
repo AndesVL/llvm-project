@@ -4,6 +4,15 @@ set(LLVM_LINK_COMPONENTS
   Support
   )
 
+# In a standard Clang+LLVM build, we need to generate intrinsics before
+# building basic. In a standalone build, LLVM is already built and we don't
+# need this dependency. Furthermore, LLVM doesn't export it so we can't have
+# this dependency.
+set(basic_deps intrinsics_gen)
+if (CLANG_BUILT_STANDALONE)
+  set(basic_deps)
+endif()
+
 find_first_existing_vc_file("${LLVM_MAIN_SRC_DIR}" llvm_vc)
 find_first_existing_vc_file("${CLANG_SOURCE_DIR}" clang_vc)
 
@@ -12,10 +21,10 @@ set(version_inc "${CMAKE_CURRENT_BINARY_DIR}/VCSVersion.inc")
 
 set(generate_vcs_version_script "${LLVM_CMAKE_PATH}/GenerateVersionFromVCS.cmake")
 
-if(llvm_vc)
+if(llvm_vc AND LLVM_APPEND_VC_REV)
   set(llvm_source_dir ${LLVM_MAIN_SRC_DIR})
 endif()
-if(clang_vc)
+if(clang_vc AND LLVM_APPEND_VC_REV)
   set(clang_source_dir ${CLANG_SOURCE_DIR})
 endif()
 
@@ -50,6 +59,7 @@ add_clang_library(clangBasic
   FixedPoint.cpp
   IdentifierTable.cpp
   LangOptions.cpp
+  LangStandards.cpp
   Module.cpp
   ObjCRuntime.cpp
   OpenMPKinds.cpp
@@ -59,6 +69,7 @@ add_clang_library(clangBasic
   Sanitizers.cpp
   SourceLocation.cpp
   SourceManager.cpp
+  Stack.cpp
   TargetInfo.cpp
   Targets.cpp
   Targets/AArch64.cpp
@@ -90,5 +101,8 @@ add_clang_library(clangBasic
   XRayInstr.cpp
   XRayLists.cpp
   ${version_inc}
+
+  DEPENDS
+  ${basic_deps}
   )
 

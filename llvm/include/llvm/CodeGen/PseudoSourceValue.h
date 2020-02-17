@@ -22,6 +22,7 @@ namespace llvm {
 
 class MachineFrameInfo;
 class MachineMemOperand;
+class MIRFormatter;
 class raw_ostream;
 class TargetInstrInfo;
 
@@ -53,6 +54,7 @@ private:
                                        const PseudoSourceValue* PSV);
 
   friend class MachineMemOperand; // For printCustom().
+  friend class MIRFormatter;      // For printCustom().
 
   /// Implement printing for PseudoSourceValue. This is called from
   /// Value::print or Value's operator<<.
@@ -93,7 +95,7 @@ public:
 /// A specialized PseudoSourceValue for holding FixedStack values, which must
 /// include a frame index.
 class FixedStackPseudoSourceValue : public PseudoSourceValue {
-  const int FI;
+  int FI;
 
 public:
   explicit FixedStackPseudoSourceValue(int FI, const TargetInstrInfo &TII)
@@ -112,6 +114,7 @@ public:
   void printCustom(raw_ostream &OS) const override;
 
   int getFrameIndex() const { return FI; }
+  void setFrameIndex(int FI) { this->FI = FI; }
 };
 
 class CallEntryPseudoSourceValue : public PseudoSourceValue {

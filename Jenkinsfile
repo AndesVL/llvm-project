@@ -16,7 +16,7 @@ TEST_RELEASE_BUILD = false
 TEST_WITH_SANITIZERS = false
 
 def updateGithubStatus(String message) {
-    setGitHubStatus(llvmRepo, [message: message])
+    setGitHubStatus(llvmRepo + [message: message])
 }
 
 def doGit(String url, String branch, String subdir, String referenceDirName) {
@@ -76,7 +76,10 @@ def doBuild() {
     stage("Checkout sources") {
         timestamps {
             echo("scm=${scm}")
-            llvmRepo = doGit('https://github.com/CTSRD-CHERI/llvm-project.git', llvmBranch, 'llvm-project', 'llvm-project')
+            // llvmRepo = doGit('https://github.com/CTSRD-CHERI/llvm-project.git', llvmBranch, 'llvm-project', 'llvm-project')
+            dir("llvm-project") {
+              llvmRepo = checkout scm
+            }
             echo("LLVM = ${llvmRepo}")
         }
     }
@@ -104,6 +107,12 @@ fi
 git -C "${WORKSPACE}/llvm-project" rev-parse HEAD
 
 cd "${WORKSPACE}/llvm-project" || exit 1
+# Print some git info to verify we are building the right commits:
+git branch
+git status
+git log -3
+
+rm -rf Build
 mkdir -p Build
 
 # Remove some files that may have been created in a previous run:
@@ -262,21 +271,25 @@ node(nodeLabel) {
         // Scan for compiler warnings
         warnings canComputeNew: false, canResolveRelativePaths: true, consoleParsers: [[parserName: 'Clang (LLVM based)']]
         step([$class: 'AnalysisPublisher', canComputeNew: false])
-    } finally {
-        // Remove the test binaries to save some disk space and to make typos in
-        // test scripts fail the build even if a previous commit created that file
-        for (path in [env.SDKROOT_DIR, 'llvm-project/Build/test',
-                     'llvm-project/Build/tools/clang/test', 'llvm-project/Build/tools/lld/test']) {
-            dir(path) {
-                deleteDir()
+        } catch (e) {
+            currentBuild.currentResult = 'FAILURE'
+            currentBuild.result = 'FAILURE'
+            throw e
+        } finally {
+            // Remove the test binaries to save some disk space and to make typos in
+            // test scripts fail the build even if a previous commit created that file
+            for (path in [env.SDKROOT_DIR, 'llvm-project/Build/test',
+                         'llvm-project/Build/tools/clang/test', 'llvm-project/Build/tools/lld/test']) {
+                dir(path) {
+                    deleteDir()
+                }
             }
-        }
         // set the final build result so we can update the github status
         try {
             currentBuild.result = currentBuild.currentResult
             updateGithubStatus("Build completed.")
         }
-        catch(Exception e) {
+        catch(e) {
            echo("Failed to set github status: ${e}")
         }
     }

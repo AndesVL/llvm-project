@@ -16,9 +16,7 @@
 #include "lldb/Breakpoint/Watchpoint.h"
 #include "lldb/Breakpoint/WatchpointList.h"
 #include "lldb/Core/ValueObject.h"
-#include "lldb/Core/ValueObjectVariable.h"
 #include "lldb/Host/OptionParser.h"
-#include "lldb/Interpreter/CommandCompletions.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
 #include "lldb/Interpreter/CommandReturnObject.h"
 #include "lldb/Symbol/Variable.h"
@@ -40,11 +38,6 @@ static void AddWatchpointDescription(Stream *s, Watchpoint *wp,
 
 static bool CheckTargetForWatchpointOperations(Target *target,
                                                CommandReturnObject &result) {
-  if (target == nullptr) {
-    result.AppendError("Invalid target.  No existing target or watchpoints.");
-    result.SetStatus(eReturnStatusFailed);
-    return false;
-  }
   bool process_is_valid =
       target->GetProcessSP() && target->GetProcessSP()->IsAlive();
   if (!process_is_valid) {
@@ -94,12 +87,12 @@ bool CommandObjectMultiwordWatchpoint::VerifyWatchpointIDs(
   // Go through the arguments and make a canonical form of arg list containing
   // only numbers with possible "-" in between.
   for (auto &entry : args.entries()) {
-    if ((idx = WithRSAIndex(entry.ref)) == -1) {
-      StrRefArgs.push_back(entry.ref);
+    if ((idx = WithRSAIndex(entry.ref())) == -1) {
+      StrRefArgs.push_back(entry.ref());
       continue;
     }
     // The Arg contains the range specifier, split it, then.
-    std::tie(first, second) = entry.ref.split(RSA[idx]);
+    std::tie(first, second) = entry.ref().split(RSA[idx]);
     if (!first.empty())
       StrRefArgs.push_back(first);
     StrRefArgs.push_back(Minus);
@@ -146,14 +139,8 @@ bool CommandObjectMultiwordWatchpoint::VerifyWatchpointIDs(
 
 // CommandObjectWatchpointList::Options
 #pragma mark List::CommandOptions
-
-static constexpr OptionDefinition g_watchpoint_list_options[] = {
-    // clang-format off
-  { LLDB_OPT_SET_1, false, "brief",   'b', OptionParser::eNoArgument, nullptr, {}, 0, eArgTypeNone, "Give a brief description of the watchpoint (no location info)." },
-  { LLDB_OPT_SET_2, false, "full",    'f', OptionParser::eNoArgument, nullptr, {}, 0, eArgTypeNone, "Give a full description of the watchpoint and its locations." },
-  { LLDB_OPT_SET_3, false, "verbose", 'v', OptionParser::eNoArgument, nullptr, {}, 0, eArgTypeNone, "Explain everything we know about the watchpoint (for debugging debugger bugs)." }
-    // clang-format on
-};
+#define LLDB_OPTIONS_watchpoint_list
+#include "CommandOptions.inc"
 
 #pragma mark List
 
@@ -162,7 +149,8 @@ public:
   CommandObjectWatchpointList(CommandInterpreter &interpreter)
       : CommandObjectParsed(
             interpreter, "watchpoint list",
-            "List all watchpoints at configurable levels of detail.", nullptr),
+            "List all watchpoints at configurable levels of detail.", nullptr,
+            eCommandRequiresTarget),
         m_options() {
     CommandArgumentEntry arg;
     CommandObject::AddIDsArgumentData(arg, eArgTypeWatchpointID,
@@ -202,9 +190,7 @@ public:
         m_level = lldb::eDescriptionLevelVerbose;
         break;
       default:
-        error.SetErrorStringWithFormat("unrecognized option '%c'",
-                                       short_option);
-        break;
+        llvm_unreachable("Unimplemented option");
       }
 
       return error;
@@ -225,12 +211,7 @@ public:
 
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Target *target = GetDebugger().GetSelectedTarget().get();
-    if (target == nullptr) {
-      result.AppendError("Invalid target. No current target or watchpoints.");
-      result.SetStatus(eReturnStatusSuccessFinishNoResult);
-      return true;
-    }
+    Target *target = &GetSelectedTarget();
 
     if (target->GetProcessSP() && target->GetProcessSP()->IsAlive()) {
       uint32_t num_supported_hardware_watchpoints;
@@ -300,7 +281,7 @@ public:
       : CommandObjectParsed(interpreter, "enable",
                             "Enable the specified disabled watchpoint(s). If "
                             "no watchpoints are specified, enable all of them.",
-                            nullptr) {
+                            nullptr, eCommandRequiresTarget) {
     CommandArgumentEntry arg;
     CommandObject::AddIDsArgumentData(arg, eArgTypeWatchpointID,
                                       eArgTypeWatchpointIDRange);
@@ -313,7 +294,7 @@ public:
 
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Target *target = GetDebugger().GetSelectedTarget().get();
+    Target *target = &GetSelectedTarget();
     if (!CheckTargetForWatchpointOperations(target, result))
       return false;
 
@@ -370,7 +351,7 @@ public:
                             "Disable the specified watchpoint(s) without "
                             "removing it/them.  If no watchpoints are "
                             "specified, disable them all.",
-                            nullptr) {
+                            nullptr, eCommandRequiresTarget) {
     CommandArgumentEntry arg;
     CommandObject::AddIDsArgumentData(arg, eArgTypeWatchpointID,
                                       eArgTypeWatchpointIDRange);
@@ -383,7 +364,7 @@ public:
 
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Target *target = GetDebugger().GetSelectedTarget().get();
+    Target *target = &GetSelectedTarget();
     if (!CheckTargetForWatchpointOperations(target, result))
       return false;
 
@@ -434,6 +415,10 @@ protected:
 };
 
 // CommandObjectWatchpointDelete
+#define LLDB_OPTIONS_watchpoint_delete
+#include "CommandOptions.inc"
+
+// CommandObjectWatchpointDelete
 #pragma mark Delete
 
 class CommandObjectWatchpointDelete : public CommandObjectParsed {
@@ -442,7 +427,8 @@ public:
       : CommandObjectParsed(interpreter, "watchpoint delete",
                             "Delete the specified watchpoint(s).  If no "
                             "watchpoints are specified, delete them all.",
-                            nullptr) {
+                            nullptr, eCommandRequiresTarget),
+        m_options() {
     CommandArgumentEntry arg;
     CommandObject::AddIDsArgumentData(arg, eArgTypeWatchpointID,
                                       eArgTypeWatchpointIDRange);
@@ -453,9 +439,44 @@ public:
 
   ~CommandObjectWatchpointDelete() override = default;
 
+  Options *GetOptions() override { return &m_options; }
+
+  class CommandOptions : public Options {
+  public:
+    CommandOptions() : Options(), m_force(false) {}
+
+    ~CommandOptions() override = default;
+
+    Status SetOptionValue(uint32_t option_idx, llvm::StringRef option_arg,
+                          ExecutionContext *execution_context) override {
+      const int short_option = m_getopt_table[option_idx].val;
+
+      switch (short_option) {
+      case 'f':
+        m_force = true;
+        break;
+      default:
+        llvm_unreachable("Unimplemented option");
+      }
+
+      return {};
+    }
+
+    void OptionParsingStarting(ExecutionContext *execution_context) override {
+      m_force = false;
+    }
+
+    llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
+      return llvm::makeArrayRef(g_watchpoint_delete_options);
+    }
+
+    // Instance variables to hold the values for command options.
+    bool m_force;
+  };
+
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Target *target = GetDebugger().GetSelectedTarget().get();
+    Target *target = &GetSelectedTarget();
     if (!CheckTargetForWatchpointOperations(target, result))
       return false;
 
@@ -472,8 +493,9 @@ protected:
       return false;
     }
 
-    if (command.GetArgumentCount() == 0) {
-      if (!m_interpreter.Confirm(
+    if (command.empty()) {
+      if (!m_options.m_force &&
+          !m_interpreter.Confirm(
               "About to delete all watchpoints, do you want to do that?",
               true)) {
         result.AppendMessage("Operation cancelled...");
@@ -484,37 +506,38 @@ protected:
                                        (uint64_t)num_watchpoints);
       }
       result.SetStatus(eReturnStatusSuccessFinishNoResult);
-    } else {
-      // Particular watchpoints selected; delete them.
-      std::vector<uint32_t> wp_ids;
-      if (!CommandObjectMultiwordWatchpoint::VerifyWatchpointIDs(
-              target, command, wp_ids)) {
-        result.AppendError("Invalid watchpoints specification.");
-        result.SetStatus(eReturnStatusFailed);
-        return false;
-      }
-
-      int count = 0;
-      const size_t size = wp_ids.size();
-      for (size_t i = 0; i < size; ++i)
-        if (target->RemoveWatchpointByID(wp_ids[i]))
-          ++count;
-      result.AppendMessageWithFormat("%d watchpoints deleted.\n", count);
-      result.SetStatus(eReturnStatusSuccessFinishNoResult);
+      return result.Succeeded();
     }
+
+    // Particular watchpoints selected; delete them.
+    std::vector<uint32_t> wp_ids;
+    if (!CommandObjectMultiwordWatchpoint::VerifyWatchpointIDs(target, command,
+                                                               wp_ids)) {
+      result.AppendError("Invalid watchpoints specification.");
+      result.SetStatus(eReturnStatusFailed);
+      return false;
+    }
+
+    int count = 0;
+    const size_t size = wp_ids.size();
+    for (size_t i = 0; i < size; ++i)
+      if (target->RemoveWatchpointByID(wp_ids[i]))
+        ++count;
+    result.AppendMessageWithFormat("%d watchpoints deleted.\n", count);
+    result.SetStatus(eReturnStatusSuccessFinishNoResult);
 
     return result.Succeeded();
   }
+
+private:
+  CommandOptions m_options;
 };
 
 // CommandObjectWatchpointIgnore
 
 #pragma mark Ignore::CommandOptions
-static constexpr OptionDefinition g_watchpoint_ignore_options[] = {
-    // clang-format off
-  { LLDB_OPT_SET_ALL, true, "ignore-count", 'i', OptionParser::eRequiredArgument, nullptr, {}, 0, eArgTypeCount, "Set the number of times this watchpoint is skipped before stopping." }
-    // clang-format on
-};
+#define LLDB_OPTIONS_watchpoint_ignore
+#include "CommandOptions.inc"
 
 class CommandObjectWatchpointIgnore : public CommandObjectParsed {
 public:
@@ -522,7 +545,7 @@ public:
       : CommandObjectParsed(interpreter, "watchpoint ignore",
                             "Set ignore count on the specified watchpoint(s).  "
                             "If no watchpoints are specified, set them all.",
-                            nullptr),
+                            nullptr, eCommandRequiresTarget),
         m_options() {
     CommandArgumentEntry arg;
     CommandObject::AddIDsArgumentData(arg, eArgTypeWatchpointID,
@@ -554,9 +577,7 @@ public:
                                          option_arg.str().c_str());
         break;
       default:
-        error.SetErrorStringWithFormat("unrecognized option '%c'",
-                                       short_option);
-        break;
+        llvm_unreachable("Unimplemented option");
       }
 
       return error;
@@ -577,7 +598,7 @@ public:
 
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Target *target = GetDebugger().GetSelectedTarget().get();
+    Target *target = &GetSelectedTarget();
     if (!CheckTargetForWatchpointOperations(target, result))
       return false;
 
@@ -629,12 +650,8 @@ private:
 // CommandObjectWatchpointModify
 
 #pragma mark Modify::CommandOptions
-
-static constexpr OptionDefinition g_watchpoint_modify_options[] = {
-    // clang-format off
-  { LLDB_OPT_SET_ALL, false, "condition", 'c', OptionParser::eRequiredArgument, nullptr, {}, 0, eArgTypeExpression, "The watchpoint stops only if this condition expression evaluates to true." }
-    // clang-format on
-};
+#define LLDB_OPTIONS_watchpoint_modify
+#include "CommandOptions.inc"
 
 #pragma mark Modify
 
@@ -648,7 +665,7 @@ public:
             "If no watchpoint is specified, act on the last created "
             "watchpoint.  "
             "Passing an empty argument clears the modification.",
-            nullptr),
+            nullptr, eCommandRequiresTarget),
         m_options() {
     CommandArgumentEntry arg;
     CommandObject::AddIDsArgumentData(arg, eArgTypeWatchpointID,
@@ -679,9 +696,7 @@ public:
         m_condition_passed = true;
         break;
       default:
-        error.SetErrorStringWithFormat("unrecognized option '%c'",
-                                       short_option);
-        break;
+        llvm_unreachable("Unimplemented option");
       }
 
       return error;
@@ -704,7 +719,7 @@ public:
 
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Target *target = GetDebugger().GetSelectedTarget().get();
+    Target *target = &GetSelectedTarget();
     if (!CheckTargetForWatchpointOperations(target, result))
       return false;
 
@@ -813,12 +828,12 @@ corresponding to the byte size of the data type.");
 protected:
   static size_t GetVariableCallback(void *baton, const char *name,
                                     VariableList &variable_list) {
+    size_t old_size = variable_list.GetSize();
     Target *target = static_cast<Target *>(baton);
-    if (target) {
-      return target->GetImages().FindGlobalVariables(ConstString(name),
-                                                     UINT32_MAX, variable_list);
-    }
-    return 0;
+    if (target)
+      target->GetImages().FindGlobalVariables(ConstString(name), UINT32_MAX,
+                                              variable_list);
+    return variable_list.GetSize() - old_size;
   }
 
   bool DoExecute(Args &command, CommandReturnObject &result) override {

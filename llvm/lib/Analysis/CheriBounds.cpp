@@ -2,9 +2,10 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/raw_ostream.h"
 
 // TODO: replace this with cheri-bounds
-#define DEBUG_TYPE "cheri-purecap-alloca"
+#define DEBUG_TYPE "cheri-bound-allocas"
 
 using namespace llvm;
 #define DBG_MESSAGE(...) LLVM_DEBUG(dbgs() << DEBUG_TYPE ": " << __VA_ARGS__)
@@ -144,7 +145,6 @@ bool CheriNeedBoundsChecker::useNeedsBounds(const Use &U,
     case Intrinsic::cheri_cap_length_get:
     case Intrinsic::cheri_cap_load_tags:
     case Intrinsic::cheri_cap_offset_get:
-    case Intrinsic::cheri_cap_offset_increment:
     case Intrinsic::cheri_cap_offset_set:
     case Intrinsic::cheri_cap_perms_and:
     case Intrinsic::cheri_cap_perms_check:
@@ -152,6 +152,7 @@ bool CheriNeedBoundsChecker::useNeedsBounds(const Use &U,
     case Intrinsic::cheri_cap_flags_set:
     case Intrinsic::cheri_cap_flags_get:
     case Intrinsic::cheri_cap_seal:
+    case Intrinsic::cheri_cap_seal_entry:
     case Intrinsic::cheri_cap_sealed_get:
     case Intrinsic::cheri_cap_subset_test:
     case Intrinsic::cheri_cap_tag_clear:
@@ -169,7 +170,7 @@ bool CheriNeedBoundsChecker::useNeedsBounds(const Use &U,
     default:
       errs() << DEBUG_TYPE
              << ": Don't know how to handle intrinsic. Assuming bounds needed";
-      I->dump();
+      I->print(errs(), true);
       DBG_INDENTED("Adding stack bounds for unknown intrinsic call: ";
                    I->dump());
       return true;
@@ -230,7 +231,7 @@ bool CheriNeedBoundsChecker::useNeedsBounds(const Use &U,
   default:
     // Something else - be conservative and say it needs bounds.
     errs() << "DON'T know how to handle ";
-    I->dump();
+    I->print(errs(), true);
     DBG_INDENTED("Adding stack bounds since don't know how to handle: ";
                  I->dump());
     return true;

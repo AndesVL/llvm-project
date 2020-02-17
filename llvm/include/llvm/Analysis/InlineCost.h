@@ -67,10 +67,10 @@ class InlineCost {
   };
 
   /// The estimated cost of inlining this callsite.
-  const int Cost;
+  int Cost;
 
   /// The adjusted threshold against which this cost was computed.
-  const int Threshold;
+  int Threshold;
 
   /// Must be set for Always and Never instances.
   const char *Reason = nullptr;
@@ -131,14 +131,22 @@ public:
 };
 
 /// InlineResult is basically true or false. For false results the message
-/// describes a reason why it is decided not to inline.
-struct InlineResult {
-  const char *message = nullptr;
-  InlineResult(bool result, const char *message = nullptr)
-      : message(result ? nullptr : (message ? message : "cost > threshold")) {}
-  InlineResult(const char *message = nullptr) : message(message) {}
-  operator bool() const { return !message; }
-  operator const char *() const { return message; }
+/// describes a reason.
+class InlineResult {
+  const char *Message = nullptr;
+  InlineResult(const char *Message = nullptr) : Message(Message) {}
+
+public:
+  static InlineResult success() { return {}; }
+  static InlineResult failure(const char *Reason) {
+    return InlineResult(Reason);
+  }
+  bool isSuccess() const { return Message == nullptr; }
+  const char *getFailureReason() const {
+    assert(!isSuccess() &&
+           "getFailureReason should only be called in failure cases");
+    return Message;
+  }
 };
 
 /// Thresholds to tune inline cost analysis. The inline cost analysis decides

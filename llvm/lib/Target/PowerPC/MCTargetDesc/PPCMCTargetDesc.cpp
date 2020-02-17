@@ -30,6 +30,7 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCSymbolELF.h"
+#include "llvm/MC/MCSymbolXCOFF.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -48,9 +49,9 @@ using namespace llvm;
 #define GET_REGINFO_MC_DESC
 #include "PPCGenRegisterInfo.inc"
 
-// Pin the vtable to this file.
 PPCTargetStreamer::PPCTargetStreamer(MCStreamer &S) : MCTargetStreamer(S) {}
 
+// Pin the vtable to this file.
 PPCTargetStreamer::~PPCTargetStreamer() = default;
 
 static MCInstrInfo *createPPCMCInstrInfo() {
@@ -76,13 +77,14 @@ static MCSubtargetInfo *createPPCMCSubtargetInfo(const Triple &TT,
 }
 
 static MCAsmInfo *createPPCMCAsmInfo(const MCRegisterInfo &MRI,
-                                     const Triple &TheTriple) {
+                                     const Triple &TheTriple,
+                                     const MCTargetOptions &Options) {
   bool isPPC64 = (TheTriple.getArch() == Triple::ppc64 ||
                   TheTriple.getArch() == Triple::ppc64le);
 
   MCAsmInfo *MAI;
-  if (TheTriple.isOSDarwin())
-    MAI = new PPCMCAsmInfoDarwin(isPPC64, TheTriple);
+  if (TheTriple.isOSBinFormatXCOFF())
+    MAI = new PPCXCOFFMCAsmInfo(isPPC64, TheTriple);
   else
     MAI = new PPCELFMCAsmInfo(isPPC64, TheTriple);
 
@@ -105,8 +107,11 @@ public:
       : PPCTargetStreamer(S), OS(OS) {}
 
   void emitTCEntry(const MCSymbol &S) override {
+    const MCAsmInfo *MAI = Streamer.getContext().getAsmInfo();
     OS << "\t.tc ";
-    OS << S.getName();
+    OS << (MAI->getSymbolsHaveSMC()
+               ? cast<MCSymbolXCOFF>(S).getUnqualifiedName()
+               : S.getName());
     OS << "[TC],";
     OS << S.getName();
     OS << '\n';
@@ -194,7 +199,8 @@ public:
 
   void finish() override {
     for (auto *Sym : UpdateOther)
-      copyLocalEntry(Sym, Sym->getVariableValue());
+      if (Sym->isVariable())
+        copyLocalEntry(Sym, Sym->getVariableValue());
   }
 
 private:
@@ -235,6 +241,30 @@ public:
   }
 };
 
+class PPCTargetXCOFFStreamer : public PPCTargetStreamer {
+public:
+  PPCTargetXCOFFStreamer(MCStreamer &S) : PPCTargetStreamer(S) {}
+
+  void emitTCEntry(const MCSymbol &S) override {
+    const MCAsmInfo *MAI = Streamer.getContext().getAsmInfo();
+    const unsigned PointerSize = MAI->getCodePointerSize();
+    Streamer.EmitValueToAlignment(PointerSize);
+    Streamer.EmitSymbolValue(&S, PointerSize);
+  }
+
+  void emitMachine(StringRef CPU) override {
+    llvm_unreachable("Machine pseudo-ops are invalid for XCOFF.");
+  }
+
+  void emitAbiVersion(int AbiVersion) override {
+    llvm_unreachable("ABI-version pseudo-ops are invalid for XCOFF.");
+  }
+
+  void emitLocalEntry(MCSymbolELF *S, const MCExpr *LocalOffset) override {
+    llvm_unreachable("Local-entry pseudo-ops are invalid for XCOFF.");
+  }
+};
+
 } // end anonymous namespace
 
 static MCTargetStreamer *createAsmTargetStreamer(MCStreamer &S,
@@ -250,6 +280,8 @@ createObjectTargetStreamer(MCStreamer &S, const MCSubtargetInfo &STI) {
   const Triple &TT = STI.getTargetTriple();
   if (TT.isOSBinFormatELF())
     return new PPCTargetELFStreamer(S);
+  if (TT.isOSBinFormatXCOFF())
+    return new PPCTargetXCOFFStreamer(S);
   return new PPCTargetMachOStreamer(S);
 }
 
@@ -261,7 +293,7 @@ static MCInstPrinter *createPPCMCInstPrinter(const Triple &T,
   return new PPCInstPrinter(MAI, MII, MRI, T);
 }
 
-extern "C" void LLVMInitializePowerPCTargetMC() {
+extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializePowerPCTargetMC() {
   for (Target *T :
        {&getThePPC32Target(), &getThePPC64Target(), &getThePPC64LETarget()}) {
     // Register the MC asm info.

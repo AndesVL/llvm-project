@@ -494,7 +494,13 @@ public:
   /// that is known to return 0 or 1.  This happens for _Bool/bool expressions
   /// but also int expressions which are produced by things like comparisons in
   /// C.
-  bool isKnownToHaveBooleanValue() const;
+  ///
+  /// \param Semantic If true, only return true for expressions that are known
+  /// to be semantically boolean, which might not be true even for expressions
+  /// that are known to evaluate to 0/1. For instance, reading an unsigned
+  /// bit-field with width '1' will evaluate to 0/1, but doesn't necessarily
+  /// semantically correspond to a bool.
+  bool isKnownToHaveBooleanValue(bool Semantic = true) const;
 
   /// isIntegerConstantExpr - Return true if this expression is a valid integer
   /// constant expression, and, if so, return its value in Result.  If not a
@@ -599,7 +605,8 @@ public:
   /// which we can fold and convert to a boolean condition using
   /// any crazy technique that we want to, even if the expression has
   /// side-effects.
-  bool EvaluateAsBooleanCondition(bool &Result, const ASTContext &Ctx) const;
+  bool EvaluateAsBooleanCondition(bool &Result, const ASTContext &Ctx,
+                                  bool InConstantContext = false) const;
 
   enum SideEffectsKind {
     SE_NoSideEffects,          ///< Strictly evaluate the expression.
@@ -611,20 +618,21 @@ public:
   /// EvaluateAsInt - Return true if this is a constant which we can fold and
   /// convert to an integer, using any crazy technique that we want to.
   bool EvaluateAsInt(EvalResult &Result, const ASTContext &Ctx,
-                     SideEffectsKind AllowSideEffects = SE_NoSideEffects) const;
+                     SideEffectsKind AllowSideEffects = SE_NoSideEffects,
+                     bool InConstantContext = false) const;
 
   /// EvaluateAsFloat - Return true if this is a constant which we can fold and
   /// convert to a floating point value, using any crazy technique that we
   /// want to.
-  bool
-  EvaluateAsFloat(llvm::APFloat &Result, const ASTContext &Ctx,
-                  SideEffectsKind AllowSideEffects = SE_NoSideEffects) const;
+  bool EvaluateAsFloat(llvm::APFloat &Result, const ASTContext &Ctx,
+                       SideEffectsKind AllowSideEffects = SE_NoSideEffects,
+                       bool InConstantContext = false) const;
 
   /// EvaluateAsFloat - Return true if this is a constant which we can fold and
   /// convert to a fixed point value.
-  bool EvaluateAsFixedPoint(
-      EvalResult &Result, const ASTContext &Ctx,
-      SideEffectsKind AllowSideEffects = SE_NoSideEffects) const;
+  bool EvaluateAsFixedPoint(EvalResult &Result, const ASTContext &Ctx,
+                            SideEffectsKind AllowSideEffects = SE_NoSideEffects,
+                            bool InConstantContext = false) const;
 
   /// isEvaluatable - Call EvaluateAsRValue to see if this expression can be
   /// constant folded without side-effects, but discard the result.
@@ -660,7 +668,8 @@ public:
 
   /// EvaluateAsLValue - Evaluate an expression to see if we can fold it to an
   /// lvalue with link time known address, with no side-effects.
-  bool EvaluateAsLValue(EvalResult &Result, const ASTContext &Ctx) const;
+  bool EvaluateAsLValue(EvalResult &Result, const ASTContext &Ctx,
+                        bool InConstantContext = false) const;
 
   /// EvaluateAsInitializer - Evaluate an expression as if it were the
   /// initializer of the given declaration. Returns true if the initializer
@@ -753,6 +762,15 @@ public:
   /// member expression.
   static QualType findBoundMemberType(const Expr *expr);
 
+  /// Skip past any invisble AST nodes which might surround this
+  /// statement, such as ExprWithCleanups or ImplicitCastExpr nodes,
+  /// but also injected CXXMemberExpr and CXXConstructExpr which represent
+  /// implicit conversions.
+  Expr *IgnoreUnlessSpelledInSource();
+  const Expr *IgnoreUnlessSpelledInSource() const {
+    return const_cast<Expr *>(this)->IgnoreUnlessSpelledInSource();
+  }
+
   /// Skip past any implicit casts which might surround this expression until
   /// reaching a fixed point. Skips:
   /// * ImplicitCastExpr
@@ -781,6 +799,16 @@ public:
   Expr *IgnoreImplicit() LLVM_READONLY;
   const Expr *IgnoreImplicit() const {
     return const_cast<Expr *>(this)->IgnoreImplicit();
+  }
+
+  /// Skip past any implicit AST nodes which might surround this expression
+  /// until reaching a fixed point. Same as IgnoreImplicit, except that it
+  /// also skips over implicit calls to constructors and conversion functions.
+  ///
+  /// FIXME: Should IgnoreImplicit do this?
+  Expr *IgnoreImplicitAsWritten() LLVM_READONLY;
+  const Expr *IgnoreImplicitAsWritten() const {
+    return const_cast<Expr *>(this)->IgnoreImplicitAsWritten();
   }
 
   /// Skip past any parentheses which might surround this expression until
@@ -922,6 +950,11 @@ public:
   QualType getRealReferenceType(ASTContext &C,
                                 bool LValuesAsReferences = true) const;
 
+  /// Checks that the two Expr's will refer to the same value as a comparison
+  /// operand.  The caller must ensure that the values referenced by the Expr's
+  /// are not modified between E1 and E2 or the result my be invalid.
+  static bool isSameComparisonOperand(const Expr* E1, const Expr* E2);
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() >= firstExprConstant &&
            T->getStmtClass() <= lastExprConstant;
@@ -959,20 +992,63 @@ public:
   }
 };
 
-/// ConstantExpr - An expression that occurs in a constant context.
-class ConstantExpr : public FullExpr {
-  ConstantExpr(Expr *subexpr)
-    : FullExpr(ConstantExprClass, subexpr) {}
+/// ConstantExpr - An expression that occurs in a constant context and
+/// optionally the result of evaluating the expression.
+class ConstantExpr final
+    : public FullExpr,
+      private llvm::TrailingObjects<ConstantExpr, APValue, uint64_t> {
+  static_assert(std::is_same<uint64_t, llvm::APInt::WordType>::value,
+                "this class assumes llvm::APInt::WordType is uint64_t for "
+                "trail-allocated storage");
 
 public:
-  static ConstantExpr *Create(const ASTContext &Context, Expr *E) {
-    assert(!isa<ConstantExpr>(E));
-    return new (Context) ConstantExpr(E);
+  /// Describes the kind of result that can be trail-allocated.
+  enum ResultStorageKind { RSK_None, RSK_Int64, RSK_APValue };
+
+private:
+  size_t numTrailingObjects(OverloadToken<APValue>) const {
+    return ConstantExprBits.ResultKind == ConstantExpr::RSK_APValue;
+  }
+  size_t numTrailingObjects(OverloadToken<uint64_t>) const {
+    return ConstantExprBits.ResultKind == ConstantExpr::RSK_Int64;
   }
 
-  /// Build an empty constant expression wrapper.
-  explicit ConstantExpr(EmptyShell Empty)
-    : FullExpr(ConstantExprClass, Empty) {}
+  void DefaultInit(ResultStorageKind StorageKind);
+  uint64_t &Int64Result() {
+    assert(ConstantExprBits.ResultKind == ConstantExpr::RSK_Int64 &&
+           "invalid accessor");
+    return *getTrailingObjects<uint64_t>();
+  }
+  const uint64_t &Int64Result() const {
+    return const_cast<ConstantExpr *>(this)->Int64Result();
+  }
+  APValue &APValueResult() {
+    assert(ConstantExprBits.ResultKind == ConstantExpr::RSK_APValue &&
+           "invalid accessor");
+    return *getTrailingObjects<APValue>();
+  }
+  const APValue &APValueResult() const {
+    return const_cast<ConstantExpr *>(this)->APValueResult();
+  }
+
+  ConstantExpr(Expr *subexpr, ResultStorageKind StorageKind);
+  ConstantExpr(ResultStorageKind StorageKind, EmptyShell Empty);
+
+public:
+  friend TrailingObjects;
+  friend class ASTStmtReader;
+  friend class ASTStmtWriter;
+  static ConstantExpr *Create(const ASTContext &Context, Expr *E,
+                              const APValue &Result);
+  static ConstantExpr *Create(const ASTContext &Context, Expr *E,
+                              ResultStorageKind Storage = RSK_None);
+  static ConstantExpr *CreateEmpty(const ASTContext &Context,
+                                   ResultStorageKind StorageKind,
+                                   EmptyShell Empty);
+
+  static ResultStorageKind getStorageKind(const APValue &Value);
+  static ResultStorageKind getStorageKind(const Type *T,
+                                          const ASTContext &Context);
 
   SourceLocation getBeginLoc() const LLVM_READONLY {
     return SubExpr->getBeginLoc();
@@ -985,6 +1061,20 @@ public:
     return T->getStmtClass() == ConstantExprClass;
   }
 
+  void SetResult(APValue Value, const ASTContext &Context) {
+    MoveIntoResult(Value, Context);
+  }
+  void MoveIntoResult(APValue &Value, const ASTContext &Context);
+
+  APValue::ValueKind getResultAPValueKind() const {
+    return static_cast<APValue::ValueKind>(ConstantExprBits.APValueKind);
+  }
+  ResultStorageKind getResultStorageKind() const {
+    return static_cast<ResultStorageKind>(ConstantExprBits.ResultKind);
+  }
+  APValue getAPValueResult() const;
+  const APValue &getResultAsAPValue() const { return APValueResult(); }
+  llvm::APSInt getResultAsAPSInt() const;
   // Iterators
   child_range children() { return child_range(&SubExpr, &SubExpr+1); }
   const_child_range children() const {
@@ -1533,21 +1623,28 @@ public:
 
   /// Get a raw enumeration value representing the floating-point semantics of
   /// this literal (32-bit IEEE, x87, ...), suitable for serialisation.
-  APFloatSemantics getRawSemantics() const {
-    return static_cast<APFloatSemantics>(FloatingLiteralBits.Semantics);
+  llvm::APFloatBase::Semantics getRawSemantics() const {
+    return static_cast<llvm::APFloatBase::Semantics>(
+        FloatingLiteralBits.Semantics);
   }
 
   /// Set the raw enumeration value representing the floating-point semantics of
   /// this literal (32-bit IEEE, x87, ...), suitable for serialisation.
-  void setRawSemantics(APFloatSemantics Sem) {
+  void setRawSemantics(llvm::APFloatBase::Semantics Sem) {
     FloatingLiteralBits.Semantics = Sem;
   }
 
   /// Return the APFloat semantics this literal uses.
-  const llvm::fltSemantics &getSemantics() const;
+  const llvm::fltSemantics &getSemantics() const {
+    return llvm::APFloatBase::EnumToSemantics(
+        static_cast<llvm::APFloatBase::Semantics>(
+            FloatingLiteralBits.Semantics));
+  }
 
   /// Set the APFloat semantics this literal uses.
-  void setSemantics(const llvm::fltSemantics &Sem);
+  void setSemantics(const llvm::fltSemantics &Sem) {
+    FloatingLiteralBits.Semantics = llvm::APFloatBase::SemanticsToEnum(Sem);
+  }
 
   bool isExact() const { return FloatingLiteralBits.IsExact; }
   void setExact(bool E) { FloatingLiteralBits.IsExact = E; }
@@ -2620,9 +2717,8 @@ public:
   /// + sizeof(Stmt *) bytes of storage, aligned to alignof(CallExpr):
   ///
   /// \code{.cpp}
-  ///   llvm::AlignedCharArray<alignof(CallExpr),
-  ///                          sizeof(CallExpr) + sizeof(Stmt *)> Buffer;
-  ///   CallExpr *TheCall = CallExpr::CreateTemporary(Buffer.buffer, etc);
+  ///   alignas(CallExpr) char Buffer[sizeof(CallExpr) + sizeof(Stmt *)];
+  ///   CallExpr *TheCall = CallExpr::CreateTemporary(Buffer, etc);
   /// \endcode
   static CallExpr *CreateTemporary(void *Mem, Expr *Fn, QualType Ty,
                                    ExprValueKind VK, SourceLocation RParenLoc,
@@ -3218,6 +3314,13 @@ public:
            T->getStmtClass() <= lastCastExprConstant;
   }
 
+  // Check if @p Dst can carry provenance (i.e. CHERI tag bits) and if not
+  // change it to the non-provenance carrying annotated type.
+  // This only applies to (u)intcap_t.
+  // This function must be called in all ::Create functions since we can't
+  // pass ASTContext& to all constructors
+  static void checkProvenance(const ASTContext &C, QualType *Dst, Expr *Src);
+
   // Iterators
   child_range children() { return child_range(&Op, &Op+1); }
   const_child_range children() const { return const_child_range(&Op, &Op + 1); }
@@ -3345,6 +3448,8 @@ class CStyleCastExpr final
       private llvm::TrailingObjects<CStyleCastExpr, CXXBaseSpecifier *> {
   SourceLocation LPLoc; // the location of the left paren
   SourceLocation RPLoc; // the location of the right paren
+  // To indicate __cheri_foo casts in dependent contexts
+  CastKind DependentCastKind = CK_Dependent;
 
   CStyleCastExpr(QualType exprTy, ExprValueKind vk, CastKind kind, Expr *op,
                  unsigned PathSize, TypeSourceInfo *writtenTy,
@@ -3371,6 +3476,18 @@ public:
 
   SourceLocation getRParenLoc() const { return RPLoc; }
   void setRParenLoc(SourceLocation L) { RPLoc = L; }
+
+
+  // These two functions are needed to correctly reassemble __cheri_* casts
+  // in template instantiations without adding a new CastExpr to the hierarchy
+  CastKind getDependentCastKind() const {
+    assert(getCastKind() == CK_Dependent);
+    return DependentCastKind;
+  }
+  void setDependentCastKind(CastKind NewCK) {
+    assert(getCastKind() == CK_Dependent);
+    DependentCastKind = NewCK;
+  }
 
   SourceLocation getBeginLoc() const LLVM_READONLY { return LPLoc; }
   SourceLocation getEndLoc() const LLVM_READONLY {
@@ -3548,6 +3665,20 @@ public:
       return Opcode(unsigned(Opc) - BO_MulAssign + BO_Mul);
   }
 
+  bool isCommutative() const { return isCommutative(getOpcode()); }
+  static bool isCommutative(Opcode Opc) {
+    switch (Opc) {
+    case BO_Add:
+    case BO_Mul:
+    case BO_And:
+    case BO_Or:
+    case BO_Xor:
+      return true;
+    default:
+      return false;
+    }
+  }
+
   static bool isShiftAssignOp(Opcode Opc) {
     return Opc == BO_ShlAssign || Opc == BO_ShrAssign;
   }
@@ -3708,22 +3839,25 @@ class ConditionalOperator : public AbstractConditionalOperator {
   friend class ASTStmtReader;
 public:
   ConditionalOperator(Expr *cond, SourceLocation QLoc, Expr *lhs,
-                      SourceLocation CLoc, Expr *rhs,
-                      QualType t, ExprValueKind VK, ExprObjectKind OK)
-    : AbstractConditionalOperator(ConditionalOperatorClass, t, VK, OK,
-           // FIXME: the type of the conditional operator doesn't
-           // depend on the type of the conditional, but the standard
-           // seems to imply that it could. File a bug!
-           (lhs->isTypeDependent() || rhs->isTypeDependent()),
-           (cond->isValueDependent() || lhs->isValueDependent() ||
-            rhs->isValueDependent()),
-           (cond->isInstantiationDependent() ||
-            lhs->isInstantiationDependent() ||
-            rhs->isInstantiationDependent()),
-           (cond->containsUnexpandedParameterPack() ||
-            lhs->containsUnexpandedParameterPack() ||
-            rhs->containsUnexpandedParameterPack()),
-                                  QLoc, CLoc) {
+                      SourceLocation CLoc, Expr *rhs, QualType t,
+                      ExprValueKind VK, ExprObjectKind OK)
+      : AbstractConditionalOperator(
+            ConditionalOperatorClass, t, VK, OK,
+            // The type of the conditional operator depends on the type
+            // of the conditional to support the GCC vector conditional
+            // extension. Additionally, [temp.dep.expr] does specify state that
+            // this should be dependent on ALL sub expressions.
+            (cond->isTypeDependent() || lhs->isTypeDependent() ||
+             rhs->isTypeDependent()),
+            (cond->isValueDependent() || lhs->isValueDependent() ||
+             rhs->isValueDependent()),
+            (cond->isInstantiationDependent() ||
+             lhs->isInstantiationDependent() ||
+             rhs->isInstantiationDependent()),
+            (cond->containsUnexpandedParameterPack() ||
+             lhs->containsUnexpandedParameterPack() ||
+             rhs->containsUnexpandedParameterPack()),
+            QLoc, CLoc) {
     SubExprs[COND] = cond;
     SubExprs[LHS] = lhs;
     SubExprs[RHS] = rhs;
@@ -4497,6 +4631,8 @@ public:
 
   // Explicit InitListExpr's originate from source code (and have valid source
   // locations). Implicit InitListExpr's are created by the semantic analyzer.
+  // FIXME: This is wrong; InitListExprs created by semantic analysis have
+  // valid source locations too!
   bool isExplicit() const {
     return LBraceLoc.isValid() && RBraceLoc.isValid();
   }
@@ -4830,6 +4966,10 @@ public:
   /// initializer value itself, if present.
   SourceLocation getEqualOrColonLoc() const { return EqualOrColonLoc; }
   void setEqualOrColonLoc(SourceLocation L) { EqualOrColonLoc = L; }
+
+  /// Whether this designated initializer should result in direct-initialization
+  /// of the designated subobject (eg, '{.foo{1, 2, 3}}').
+  bool isDirectInit() const { return EqualOrColonLoc.isInvalid(); }
 
   /// Determines whether this designated initializer used the
   /// deprecated GNU syntax for designated initializers.
@@ -5583,6 +5723,20 @@ public:
   const_child_range children() const {
     return const_child_range(const_child_iterator(), const_child_iterator());
   }
+};
+
+/// Copy initialization expr of a __block variable and a boolean flag that
+/// indicates whether the expression can throw.
+struct BlockVarCopyInit {
+  BlockVarCopyInit() = default;
+  BlockVarCopyInit(Expr *CopyExpr, bool CanThrow)
+      : ExprAndFlag(CopyExpr, CanThrow) {}
+  void setExprAndFlag(Expr *CopyExpr, bool CanThrow) {
+    ExprAndFlag.setPointerAndInt(CopyExpr, CanThrow);
+  }
+  Expr *getCopyExpr() const { return ExprAndFlag.getPointer(); }
+  bool canThrow() const { return ExprAndFlag.getInt(); }
+  llvm::PointerIntPair<Expr *, 1, bool> ExprAndFlag;
 };
 
 /// AsTypeExpr - Clang builtin function __builtin_astype [OpenCL 6.2.4.2]

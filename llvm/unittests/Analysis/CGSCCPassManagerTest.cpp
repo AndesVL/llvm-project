@@ -27,6 +27,13 @@ public:
   struct Result {
     Result(int Count) : FunctionCount(Count) {}
     int FunctionCount;
+    bool invalidate(Module &, const PreservedAnalyses &PA,
+                    ModuleAnalysisManager::Invalidator &) {
+      // Check whether the analysis or all analyses on modules have been
+      // preserved.
+      auto PAC = PA.getChecker<TestModuleAnalysis>();
+      return !(PAC.preserved() || PAC.preservedSet<AllAnalysesOn<Module>>());
+    }
   };
 
   TestModuleAnalysis(int &Runs) : Runs(Runs) {}
@@ -50,6 +57,14 @@ public:
   struct Result {
     Result(int Count) : FunctionCount(Count) {}
     int FunctionCount;
+    bool invalidate(LazyCallGraph::SCC &, const PreservedAnalyses &PA,
+                    CGSCCAnalysisManager::Invalidator &) {
+      // Check whether the analysis or all analyses on SCCs have been
+      // preserved.
+      auto PAC = PA.getChecker<TestSCCAnalysis>();
+      return !(PAC.preserved() ||
+               PAC.preservedSet<AllAnalysesOn<LazyCallGraph::SCC>>());
+    }
   };
 
   TestSCCAnalysis(int &Runs) : Runs(Runs) {}
@@ -73,6 +88,13 @@ public:
   struct Result {
     Result(int Count) : InstructionCount(Count) {}
     int InstructionCount;
+    bool invalidate(Function &, const PreservedAnalyses &PA,
+                    FunctionAnalysisManager::Invalidator &) {
+      // Check whether the analysis or all analyses on functions have been
+      // preserved.
+      auto PAC = PA.getChecker<TestFunctionAnalysis>();
+      return !(PAC.preserved() || PAC.preservedSet<AllAnalysesOn<Function>>());
+    }
   };
 
   TestFunctionAnalysis(int &Runs) : Runs(Runs) {}
@@ -227,7 +249,7 @@ public:
             "entry:\n"
             "  ret void\n"
             "}\n")) {
-    MAM.registerPass([&] { return TargetLibraryAnalysis(); });
+    FAM.registerPass([&] { return TargetLibraryAnalysis(); });
     MAM.registerPass([&] { return LazyCallGraphAnalysis(); });
     MAM.registerPass([&] { return FunctionAnalysisManagerModuleProxy(FAM); });
 

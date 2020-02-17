@@ -45,6 +45,7 @@ add_llvm_target(AMDGPUCodeGen
   AMDGPUInstructionSelector.cpp
   AMDGPUISelDAGToDAG.cpp
   AMDGPUISelLowering.cpp
+  AMDGPUGlobalISelUtils.cpp
   AMDGPULegalizerInfo.cpp
   AMDGPULibCalls.cpp
   AMDGPULibFunc.cpp
@@ -58,7 +59,7 @@ add_llvm_target(AMDGPUCodeGen
   AMDGPUMCInstLower.cpp
   AMDGPUOpenCLEnqueuedBlockLowering.cpp
   AMDGPUPromoteAlloca.cpp
-  AMDGPURegAsmNames.inc.cpp
+  AMDGPUPropagateAttributes.cpp
   AMDGPURegisterBankInfo.cpp
   AMDGPURegisterInfo.cpp
   AMDGPURewriteOutArguments.cpp
@@ -71,6 +72,7 @@ add_llvm_target(AMDGPUCodeGen
   AMDGPUInline.cpp
   AMDGPUPerfHintAnalysis.cpp
   AMDILCFGStructurizer.cpp
+  AMDGPUPrintfRuntimeBinding.cpp
   GCNHazardRecognizer.cpp
   GCNIterativeScheduler.cpp
   GCNMinRegStrategy.cpp
@@ -106,6 +108,7 @@ add_llvm_target(AMDGPUCodeGen
   SILoadStoreOptimizer.cpp
   SILowerControlFlow.cpp
   SILowerI1Copies.cpp
+  SILowerSGPRSpills.cpp
   SIMachineFunctionInfo.cpp
   SIMachineScheduler.cpp
   SIMemoryLegalizer.cpp
@@ -113,6 +116,7 @@ add_llvm_target(AMDGPUCodeGen
   SIOptimizeExecMaskingPreRA.cpp
   SIPeepholeSDWA.cpp
   SIRegisterInfo.cpp
+  SIRemoveShortExecBranches.cpp
   SIShrinkInstructions.cpp
   SIWholeQuadMode.cpp
   GCNILPSched.cpp

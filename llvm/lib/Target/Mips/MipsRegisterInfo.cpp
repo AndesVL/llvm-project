@@ -335,11 +335,6 @@ MipsRegisterInfo::requiresRegisterScavenging(const MachineFunction &MF) const {
   return true;
 }
 
-bool
-MipsRegisterInfo::trackLivenessAfterRegAlloc(const MachineFunction &MF) const {
-  return true;
-}
-
 // FrameIndex represent objects inside a abstract stack.
 // We must replace FrameIndex with an stack/frame pointer
 // direct reference.
@@ -367,7 +362,7 @@ eliminateFrameIndex(MachineBasicBlock::iterator II, int SPAdj,
   eliminateFI(MI, FIOperandNum, FrameIndex, stackSize, spOffset, RS);
 }
 
-unsigned MipsRegisterInfo::
+Register MipsRegisterInfo::
 getFrameRegister(const MachineFunction &MF) const {
   const MipsSubtarget &Subtarget = MF.getSubtarget<MipsSubtarget>();
   const TargetFrameLowering *TFI = Subtarget.getFrameLowering();

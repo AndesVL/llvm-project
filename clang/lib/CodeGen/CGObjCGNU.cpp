@@ -13,19 +13,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "CGObjCRuntime.h"
+#include "CGCXXABI.h"
 #include "CGCleanup.h"
+#include "CGObjCRuntime.h"
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
-#include "CGCXXABI.h"
-#include "clang/CodeGen/ConstantInitBuilder.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtObjC.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/CodeGen/ConstantInitBuilder.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/IR/DataLayout.h"
@@ -607,6 +608,9 @@ public:
 
   llvm::Function *GenerateMethod(const ObjCMethodDecl *OMD,
                                  const ObjCContainerDecl *CD) override;
+  void GenerateDirectMethodPrologue(CodeGenFunction &CGF, llvm::Function *Fn,
+                                    const ObjCMethodDecl *OMD,
+                                    const ObjCContainerDecl *CD) override;
   void GenerateCategory(const ObjCCategoryImplDecl *CMD) override;
   void GenerateClass(const ObjCImplementationDecl *ClassDecl) override;
   void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) override;
@@ -1234,6 +1238,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         // The first Interface we find may be a @class,
         // which should only be treated as the source of
         // truth in the absence of a true declaration.
+        assert(OID && "Failed to find ObjCInterfaceDecl");
         const ObjCInterfaceDecl *OIDDef = OID->getDefinition();
         if (OIDDef != nullptr)
           OID = OIDDef;
@@ -1296,7 +1301,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       // Emit a placeholder symbol.
       GV = new llvm::GlobalVariable(TheModule, ProtocolTy, false,
           llvm::GlobalValue::ExternalLinkage, nullptr, Name);
-      GV->setAlignment(CGM.getPointerAlign().getQuantity());
+      GV->setAlignment(CGM.getPointerAlign().getAsAlign());
     }
     return llvm::ConstantExpr::getBitCast(GV, ProtocolPtrTy);
   }
@@ -1320,7 +1325,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
           llvm::ConstantExpr::getBitCast(Protocol, ProtocolPtrTy), RefName);
       GV->setComdat(TheModule.getOrInsertComdat(RefName));
       GV->setSection(sectionName<ProtocolReferenceSection>());
-      GV->setAlignment(CGM.getPointerAlign().getQuantity());
+      GV->setAlignment(CGM.getPointerAlign().getAsAlign());
       Ref = GV;
     }
     EmittedProtocolRef = true;
@@ -1499,7 +1504,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         Sym->setSection((Section + SecSuffix).str());
         Sym->setComdat(TheModule.getOrInsertComdat((Prefix +
             Section).str()));
-        Sym->setAlignment(CGM.getPointerAlign().getQuantity());
+        Sym->setAlignment(CGM.getPointerAlign().getAsAlign());
         return Sym;
       };
       return { Sym("__start_", "$a"), Sym("__stop", "$z") };
@@ -1856,7 +1861,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         ivarBuilder.addInt(Int32Ty,
             CGM.getContext().getTypeSizeInChars(ivarTy).getQuantity());
         // Alignment will be stored as a base-2 log of the alignment.
-        int align = llvm::Log2_32(Context.getTypeAlignInChars(ivarTy).getQuantity());
+        unsigned align =
+            llvm::Log2_32(Context.getTypeAlignInChars(ivarTy).getQuantity());
         // Objects that require more than 2^64-byte alignment should be impossible!
         assert(align < 64);
         // uint32_t flags;
@@ -1881,13 +1887,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     for (auto *propImpl : OID->property_impls())
       if (propImpl->getPropertyImplementation() ==
           ObjCPropertyImplDecl::Synthesize) {
-        ObjCPropertyDecl *prop = propImpl->getPropertyDecl();
-        auto addIfExists = [&](const ObjCMethodDecl* OMD) {
-          if (OMD)
+        auto addIfExists = [&](const ObjCMethodDecl *OMD) {
+          if (OMD && OMD->hasBody())
             InstanceMethods.push_back(OMD);
         };
-        addIfExists(prop->getGetterMethodDecl());
-        addIfExists(prop->getSetterMethodDecl());
+        addIfExists(propImpl->getGetterMethodDecl());
+        addIfExists(propImpl->getSetterMethodDecl());
       }
 
     if (InstanceMethods.size() == 0)
@@ -3063,6 +3068,7 @@ llvm::Value *CGObjCGNU::GenerateProtocolRef(CodeGenFunction &CGF,
   llvm::Constant *&protocol = ExistingProtocols[PD->getNameAsString()];
   if (!protocol)
     GenerateProtocol(PD);
+  assert(protocol && "Unknown protocol");
   llvm::Type *T =
     CGM.getTypes().ConvertType(CGM.getContext().getObjCProtoType());
   unsigned AS = CGF.CGM.getTargetCodeGenInfo().getDefaultAS();
@@ -3528,13 +3534,12 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
   for (auto *propertyImpl : OID->property_impls())
     if (propertyImpl->getPropertyImplementation() ==
         ObjCPropertyImplDecl::Synthesize) {
-      ObjCPropertyDecl *property = propertyImpl->getPropertyDecl();
       auto addPropertyMethod = [&](const ObjCMethodDecl *accessor) {
         if (accessor)
           InstanceMethods.push_back(accessor);
       };
-      addPropertyMethod(property->getGetterMethodDecl());
-      addPropertyMethod(property->getSetterMethodDecl());
+      addPropertyMethod(propertyImpl->getGetterMethodDecl());
+      addPropertyMethod(propertyImpl->getSetterMethodDecl());
     }
 
   llvm::Constant *Properties = GeneratePropertyList(OID, ClassDecl);
@@ -3911,6 +3916,13 @@ llvm::Function *CGObjCGNU::GenerateMethod(const ObjCMethodDecl *OMD,
   return Method;
 }
 
+void CGObjCGNU::GenerateDirectMethodPrologue(CodeGenFunction &CGF,
+                                             llvm::Function *Fn,
+                                             const ObjCMethodDecl *OMD,
+                                             const ObjCContainerDecl *CD) {
+  // GNU runtime doesn't support direct calls at this time
+}
+
 llvm::FunctionCallee CGObjCGNU::GetPropertyGetFunction() {
   return GetPropertyFn;
 }
@@ -4079,7 +4091,7 @@ LValue CGObjCGNU::EmitObjCValueForIvar(CodeGenFunction &CGF,
                                        const ObjCIvarDecl *Ivar,
                                        unsigned CVRQualifiers) {
   const ObjCInterfaceDecl *ID =
-    ObjectTy->getAs<ObjCObjectType>()->getInterface();
+    ObjectTy->castAs<ObjCObjectType>()->getInterface();
   return EmitValueForIvarAtOffset(CGF, ID, BaseValue, Ivar, CVRQualifiers,
                                   EmitIvarOffset(CGF, ID, Ivar));
 }
@@ -4128,7 +4140,7 @@ llvm::Value *CGObjCGNU::EmitIvarOffset(CodeGenFunction &CGF,
           false, llvm::GlobalValue::LinkOnceAnyLinkage,
           llvm::Constant::getNullValue(IntTy), name, nullptr,
           llvm::GlobalVariable::NotThreadLocal, AS);
-      GV->setAlignment(Align.getQuantity());
+      GV->setAlignment(Align.getAsAlign());
       Offset = GV;
     }
     Offset = CGF.Builder.CreateAlignedLoad(Offset, Align);

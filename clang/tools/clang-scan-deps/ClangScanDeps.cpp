@@ -7,18 +7,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Frontend/CompilerInstance.h"
-#include "clang/Frontend/CompilerInvocation.h"
-#include "clang/Frontend/FrontendActions.h"
-#include "clang/Frontend/PCHContainerOperations.h"
-#include "clang/FrontendTool/Utils.h"
 #include "clang/Tooling/CommonOptionsParser.h"
+#include "clang/Tooling/DependencyScanning/DependencyScanningService.h"
+#include "clang/Tooling/DependencyScanning/DependencyScanningTool.h"
+#include "clang/Tooling/DependencyScanning/DependencyScanningWorker.h"
 #include "clang/Tooling/JSONCompilationDatabase.h"
-#include "clang/Tooling/Tooling.h"
-#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/JSON.h"
-#include "llvm/Support/Options.h"
-#include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/Threading.h"
@@ -26,97 +22,80 @@
 #include <thread>
 
 using namespace clang;
+using namespace tooling::dependencies;
 
 namespace {
 
-/// A clang tool that runs the preprocessor only for the given compiler
-/// invocation.
-class PreprocessorOnlyTool : public tooling::ToolAction {
+class SharedStream {
 public:
-  PreprocessorOnlyTool(StringRef WorkingDirectory)
-      : WorkingDirectory(WorkingDirectory) {}
-
-  bool runInvocation(std::shared_ptr<CompilerInvocation> Invocation,
-                     FileManager *FileMgr,
-                     std::shared_ptr<PCHContainerOperations> PCHContainerOps,
-                     DiagnosticConsumer *DiagConsumer) override {
-    // Create a compiler instance to handle the actual work.
-    CompilerInstance Compiler(std::move(PCHContainerOps));
-    Compiler.setInvocation(std::move(Invocation));
-    FileMgr->getFileSystemOpts().WorkingDir = WorkingDirectory;
-    Compiler.setFileManager(FileMgr);
-
-    // Create the compiler's actual diagnostics engine.
-    Compiler.createDiagnostics(DiagConsumer, /*ShouldOwnClient=*/false);
-    if (!Compiler.hasDiagnostics())
-      return false;
-
-    Compiler.createSourceManager(*FileMgr);
-
-    auto Action = llvm::make_unique<PreprocessOnlyAction>();
-    const bool Result = Compiler.ExecuteAction(*Action);
-    FileMgr->clearStatCache();
-    return Result;
+  SharedStream(raw_ostream &OS) : OS(OS) {}
+  void applyLocked(llvm::function_ref<void(raw_ostream &OS)> Fn) {
+    std::unique_lock<std::mutex> LockGuard(Lock);
+    Fn(OS);
+    OS.flush();
   }
 
 private:
-  StringRef WorkingDirectory;
+  std::mutex Lock;
+  raw_ostream &OS;
 };
 
-/// A proxy file system that doesn't call `chdir` when changing the working
-/// directory of a clang tool.
-class ProxyFileSystemWithoutChdir : public llvm::vfs::ProxyFileSystem {
+class ResourceDirectoryCache {
 public:
-  ProxyFileSystemWithoutChdir(
-      llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FS)
-      : ProxyFileSystem(std::move(FS)) {}
+  /// findResourceDir finds the resource directory relative to the clang
+  /// compiler being used in Args, by running it with "-print-resource-dir"
+  /// option and cache the results for reuse. \returns resource directory path
+  /// associated with the given invocation command or empty string if the
+  /// compiler path is NOT an absolute path.
+  StringRef findResourceDir(const tooling::CommandLineArguments &Args) {
+    if (Args.size() < 1)
+      return "";
 
-  llvm::ErrorOr<std::string> getCurrentWorkingDirectory() const override {
-    assert(!CWD.empty() && "empty CWD");
-    return CWD;
-  }
+    const std::string &ClangBinaryPath = Args[0];
+    if (!llvm::sys::path::is_absolute(ClangBinaryPath))
+      return "";
 
-  std::error_code setCurrentWorkingDirectory(const Twine &Path) override {
-    CWD = Path.str();
-    return {};
+    const std::string &ClangBinaryName =
+        llvm::sys::path::filename(ClangBinaryPath);
+
+    std::unique_lock<std::mutex> LockGuard(CacheLock);
+    const auto &CachedResourceDir = Cache.find(ClangBinaryPath);
+    if (CachedResourceDir != Cache.end())
+      return CachedResourceDir->second;
+
+    std::vector<StringRef> PrintResourceDirArgs{ClangBinaryName,
+                                                "-print-resource-dir"};
+    llvm::SmallString<64> OutputFile, ErrorFile;
+    llvm::sys::fs::createTemporaryFile("print-resource-dir-output",
+                                       "" /*no-suffix*/, OutputFile);
+    llvm::sys::fs::createTemporaryFile("print-resource-dir-error",
+                                       "" /*no-suffix*/, ErrorFile);
+    llvm::FileRemover OutputRemover(OutputFile.c_str());
+    llvm::FileRemover ErrorRemover(ErrorFile.c_str());
+    llvm::Optional<StringRef> Redirects[] = {
+        {""}, // Stdin
+        StringRef(OutputFile),
+        StringRef(ErrorFile),
+    };
+    if (const int RC = llvm::sys::ExecuteAndWait(
+            ClangBinaryPath, PrintResourceDirArgs, {}, Redirects)) {
+      auto ErrorBuf = llvm::MemoryBuffer::getFile(ErrorFile.c_str());
+      llvm::errs() << ErrorBuf.get()->getBuffer();
+      return "";
+    }
+
+    auto OutputBuf = llvm::MemoryBuffer::getFile(OutputFile.c_str());
+    if (!OutputBuf)
+      return "";
+    StringRef Output = OutputBuf.get()->getBuffer().rtrim('\n');
+
+    Cache[ClangBinaryPath] = Output.str();
+    return Cache[ClangBinaryPath];
   }
 
 private:
-  std::string CWD;
-};
-
-/// The high-level implementation of the dependency discovery tool that runs on
-/// an individual worker thread.
-class DependencyScanningTool {
-public:
-  /// Construct a dependency scanning tool.
-  ///
-  /// \param Compilations     The reference to the compilation database that's
-  /// used by the clang tool.
-  DependencyScanningTool(const tooling::CompilationDatabase &Compilations)
-      : Compilations(Compilations) {
-    PCHContainerOps = std::make_shared<PCHContainerOperations>();
-    BaseFS = new ProxyFileSystemWithoutChdir(llvm::vfs::getRealFileSystem());
-  }
-
-  /// Computes the dependencies for the given file.
-  ///
-  /// \returns True on error.
-  bool runOnFile(const std::string &Input, StringRef CWD) {
-    BaseFS->setCurrentWorkingDirectory(CWD);
-    tooling::ClangTool Tool(Compilations, Input, PCHContainerOps, BaseFS);
-    Tool.clearArgumentsAdjusters();
-    Tool.setRestoreWorkingDir(false);
-    PreprocessorOnlyTool Action(CWD);
-    return Tool.run(&Action);
-  }
-
-private:
-  const tooling::CompilationDatabase &Compilations;
-  std::shared_ptr<PCHContainerOperations> PCHContainerOps;
-  /// The real filesystem used as a base for all the operations performed by the
-  /// tool.
-  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> BaseFS;
+  std::map<std::string, std::string> Cache;
+  std::mutex CacheLock;
 };
 
 llvm::cl::opt<bool> Help("h", llvm::cl::desc("Alias for -help"),
@@ -124,18 +103,108 @@ llvm::cl::opt<bool> Help("h", llvm::cl::desc("Alias for -help"),
 
 llvm::cl::OptionCategory DependencyScannerCategory("Tool options");
 
+static llvm::cl::opt<ScanningMode> ScanMode(
+    "mode",
+    llvm::cl::desc("The preprocessing mode used to compute the dependencies"),
+    llvm::cl::values(
+        clEnumValN(ScanningMode::MinimizedSourcePreprocessing,
+                   "preprocess-minimized-sources",
+                   "The set of dependencies is computed by preprocessing the "
+                   "source files that were minimized to only include the "
+                   "contents that might affect the dependencies"),
+        clEnumValN(ScanningMode::CanonicalPreprocessing, "preprocess",
+                   "The set of dependencies is computed by preprocessing the "
+                   "unmodified source files")),
+    llvm::cl::init(ScanningMode::MinimizedSourcePreprocessing),
+    llvm::cl::cat(DependencyScannerCategory));
+
+static llvm::cl::opt<ScanningOutputFormat> Format(
+    "format", llvm::cl::desc("The output format for the dependencies"),
+    llvm::cl::values(clEnumValN(ScanningOutputFormat::Make, "make",
+                                "Makefile compatible dep file"),
+                     clEnumValN(ScanningOutputFormat::Full, "experimental-full",
+                                "Full dependency graph suitable"
+                                " for explicitly building modules. This format "
+                                "is experimental and will change.")),
+    llvm::cl::init(ScanningOutputFormat::Make),
+    llvm::cl::cat(DependencyScannerCategory));
+
 llvm::cl::opt<unsigned>
     NumThreads("j", llvm::cl::Optional,
                llvm::cl::desc("Number of worker threads to use (default: use "
                               "all concurrent threads)"),
-               llvm::cl::init(0));
+               llvm::cl::init(0), llvm::cl::cat(DependencyScannerCategory));
 
 llvm::cl::opt<std::string>
     CompilationDB("compilation-database",
                   llvm::cl::desc("Compilation database"), llvm::cl::Required,
                   llvm::cl::cat(DependencyScannerCategory));
 
+llvm::cl::opt<bool> ReuseFileManager(
+    "reuse-filemanager",
+    llvm::cl::desc("Reuse the file manager and its cache between invocations."),
+    llvm::cl::init(true), llvm::cl::cat(DependencyScannerCategory));
+
+llvm::cl::opt<bool> SkipExcludedPPRanges(
+    "skip-excluded-pp-ranges",
+    llvm::cl::desc(
+        "Use the preprocessor optimization that skips excluded conditionals by "
+        "bumping the buffer pointer in the lexer instead of lexing the tokens  "
+        "until reaching the end directive."),
+    llvm::cl::init(true), llvm::cl::cat(DependencyScannerCategory));
+
+llvm::cl::opt<bool> Verbose("v", llvm::cl::Optional,
+                            llvm::cl::desc("Use verbose output."),
+                            llvm::cl::init(false),
+                            llvm::cl::cat(DependencyScannerCategory));
+
 } // end anonymous namespace
+
+/// \returns object-file path derived from source-file path.
+static std::string getObjFilePath(StringRef SrcFile) {
+  SmallString<128> ObjFileName(SrcFile);
+  llvm::sys::path::replace_extension(ObjFileName, "o");
+  return ObjFileName.str();
+}
+
+class SingleCommandCompilationDatabase : public tooling::CompilationDatabase {
+public:
+  SingleCommandCompilationDatabase(tooling::CompileCommand Cmd)
+      : Command(std::move(Cmd)) {}
+
+  virtual std::vector<tooling::CompileCommand>
+  getCompileCommands(StringRef FilePath) const {
+    return {Command};
+  }
+
+  virtual std::vector<tooling::CompileCommand> getAllCompileCommands() const {
+    return {Command};
+  }
+
+private:
+  tooling::CompileCommand Command;
+};
+
+/// Takes the result of a dependency scan and prints error / dependency files
+/// based on the result.
+///
+/// \returns True on error.
+static bool handleDependencyToolResult(const std::string &Input,
+                                       llvm::Expected<std::string> &MaybeFile,
+                                       SharedStream &OS, SharedStream &Errs) {
+  if (!MaybeFile) {
+    llvm::handleAllErrors(
+        MaybeFile.takeError(), [&Input, &Errs](llvm::StringError &Err) {
+          Errs.applyLocked([&](raw_ostream &OS) {
+            OS << "Error while scanning dependencies for " << Input << ":\n";
+            OS << Err.getMessage();
+          });
+        });
+    return true;
+  }
+  OS.applyLocked([&](raw_ostream &OS) { OS << *MaybeFile; });
+  return false;
+}
 
 int main(int argc, const char **argv) {
   llvm::InitLLVM X(argc, argv);
@@ -155,61 +224,134 @@ int main(int argc, const char **argv) {
 
   llvm::cl::PrintOptionValues();
 
-  // By default the tool runs on all inputs in the CDB.
-  std::vector<std::pair<std::string, std::string>> Inputs;
-  for (const auto &Command : Compilations->getAllCompileCommands())
-    Inputs.emplace_back(Command.Filename, Command.Directory);
-
   // The command options are rewritten to run Clang in preprocessor only mode.
   auto AdjustingCompilations =
-      llvm::make_unique<tooling::ArgumentsAdjustingCompilations>(
+      std::make_unique<tooling::ArgumentsAdjustingCompilations>(
           std::move(Compilations));
+  ResourceDirectoryCache ResourceDirCache;
   AdjustingCompilations->appendArgumentsAdjuster(
-      [](const tooling::CommandLineArguments &Args, StringRef /*unused*/) {
+      [&ResourceDirCache](const tooling::CommandLineArguments &Args,
+                          StringRef FileName) {
+        std::string LastO = "";
+        bool HasMT = false;
+        bool HasMQ = false;
+        bool HasMD = false;
+        bool HasResourceDir = false;
+        // We need to find the last -o value.
+        if (!Args.empty()) {
+          std::size_t Idx = Args.size() - 1;
+          for (auto It = Args.rbegin(); It != Args.rend(); ++It) {
+            if (It != Args.rbegin()) {
+              if (Args[Idx] == "-o")
+                LastO = Args[Idx + 1];
+              if (Args[Idx] == "-MT")
+                HasMT = true;
+              if (Args[Idx] == "-MQ")
+                HasMQ = true;
+              if (Args[Idx] == "-MD")
+                HasMD = true;
+              if (Args[Idx] == "-resource-dir")
+                HasResourceDir = true;
+            }
+            --Idx;
+          }
+        }
+        // If there's no -MT/-MQ Driver would add -MT with the value of the last
+        // -o option.
         tooling::CommandLineArguments AdjustedArgs = Args;
         AdjustedArgs.push_back("-o");
         AdjustedArgs.push_back("/dev/null");
+        if (!HasMT && !HasMQ) {
+          AdjustedArgs.push_back("-M");
+          AdjustedArgs.push_back("-MT");
+          // We're interested in source dependencies of an object file.
+          if (!HasMD) {
+            // FIXME: We are missing the directory unless the -o value is an
+            // absolute path.
+            AdjustedArgs.push_back(!LastO.empty() ? LastO
+                                                  : getObjFilePath(FileName));
+          } else {
+            AdjustedArgs.push_back(FileName);
+          }
+        }
         AdjustedArgs.push_back("-Xclang");
         AdjustedArgs.push_back("-Eonly");
         AdjustedArgs.push_back("-Xclang");
         AdjustedArgs.push_back("-sys-header-deps");
+        AdjustedArgs.push_back("-Wno-error");
+
+        if (!HasResourceDir) {
+          StringRef ResourceDir =
+              ResourceDirCache.findResourceDir(Args);
+          if (!ResourceDir.empty()) {
+            AdjustedArgs.push_back("-resource-dir");
+            AdjustedArgs.push_back(ResourceDir);
+          }
+        }
         return AdjustedArgs;
       });
+  AdjustingCompilations->appendArgumentsAdjuster(
+      tooling::getClangStripSerializeDiagnosticAdjuster());
 
+  SharedStream Errs(llvm::errs());
+  // Print out the dependency results to STDOUT by default.
+  SharedStream DependencyOS(llvm::outs());
+
+  DependencyScanningService Service(ScanMode, Format, ReuseFileManager,
+                                    SkipExcludedPPRanges);
+#if LLVM_ENABLE_THREADS
   unsigned NumWorkers =
       NumThreads == 0 ? llvm::hardware_concurrency() : NumThreads;
+#else
+  unsigned NumWorkers = 1;
+#endif
   std::vector<std::unique_ptr<DependencyScanningTool>> WorkerTools;
   for (unsigned I = 0; I < NumWorkers; ++I)
-    WorkerTools.push_back(
-        llvm::make_unique<DependencyScanningTool>(*AdjustingCompilations));
+    WorkerTools.push_back(std::make_unique<DependencyScanningTool>(Service));
+
+  std::vector<SingleCommandCompilationDatabase> Inputs;
+  for (tooling::CompileCommand Cmd :
+       AdjustingCompilations->getAllCompileCommands())
+    Inputs.emplace_back(Cmd);
 
   std::vector<std::thread> WorkerThreads;
   std::atomic<bool> HadErrors(false);
   std::mutex Lock;
   size_t Index = 0;
 
-  llvm::outs() << "Running clang-scan-deps on " << Inputs.size()
-               << " files using " << NumWorkers << " workers\n";
+  if (Verbose) {
+    llvm::outs() << "Running clang-scan-deps on " << Inputs.size()
+                 << " files using " << NumWorkers << " workers\n";
+  }
   for (unsigned I = 0; I < NumWorkers; ++I) {
-    WorkerThreads.emplace_back(
-        [I, &Lock, &Index, &Inputs, &HadErrors, &WorkerTools]() {
-          while (true) {
-            std::string Input;
-            StringRef CWD;
-            // Take the next input.
-            {
-              std::unique_lock<std::mutex> LockGuard(Lock);
-              if (Index >= Inputs.size())
-                return;
-              const auto &Compilation = Inputs[Index++];
-              Input = Compilation.first;
-              CWD = Compilation.second;
-            }
-            // Run the tool on it.
-            if (WorkerTools[I]->runOnFile(Input, CWD))
-              HadErrors = true;
-          }
-        });
+    auto Worker = [I, &Lock, &Index, &Inputs, &HadErrors, &WorkerTools,
+                   &DependencyOS, &Errs]() {
+      while (true) {
+        const SingleCommandCompilationDatabase *Input;
+        std::string Filename;
+        std::string CWD;
+        // Take the next input.
+        {
+          std::unique_lock<std::mutex> LockGuard(Lock);
+          if (Index >= Inputs.size())
+            return;
+          Input = &Inputs[Index++];
+          tooling::CompileCommand Cmd = Input->getAllCompileCommands()[0];
+          Filename = std::move(Cmd.Filename);
+          CWD = std::move(Cmd.Directory);
+        }
+        // Run the tool on it.
+        auto MaybeFile = WorkerTools[I]->getDependencyFile(*Input, CWD);
+        if (handleDependencyToolResult(Filename, MaybeFile, DependencyOS, Errs))
+          HadErrors = true;
+      }
+    };
+#if LLVM_ENABLE_THREADS
+    WorkerThreads.emplace_back(std::move(Worker));
+#else
+    // Run the worker without spawning a thread when threads are disabled.
+    Worker();
+#endif
   }
   for (auto &W : WorkerThreads)
     W.join();

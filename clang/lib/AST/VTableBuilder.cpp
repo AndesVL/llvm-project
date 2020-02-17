@@ -270,8 +270,8 @@ static BaseOffset
 ComputeReturnAdjustmentBaseOffset(ASTContext &Context,
                                   const CXXMethodDecl *DerivedMD,
                                   const CXXMethodDecl *BaseMD) {
-  const FunctionType *BaseFT = BaseMD->getType()->getAs<FunctionType>();
-  const FunctionType *DerivedFT = DerivedMD->getType()->getAs<FunctionType>();
+  const auto *BaseFT = BaseMD->getType()->castAs<FunctionType>();
+  const auto *DerivedFT = DerivedMD->getType()->castAs<FunctionType>();
 
   // Canonicalize the return types.
   CanQualType CanDerivedReturnType =
@@ -1272,7 +1272,7 @@ ThisAdjustment ItaniumVTableBuilder::ComputeThisAdjustment(
       // We don't have vcall offsets for this virtual base, go ahead and
       // build them.
       VCallAndVBaseOffsetBuilder Builder(MostDerivedClass, MostDerivedClass,
-                                         /*FinalOverriders=*/nullptr,
+                                         /*Overriders=*/nullptr,
                                          BaseSubobject(Offset.VirtualBase,
                                                        CharUnits::Zero()),
                                          /*BaseIsVirtual=*/true,
@@ -1474,10 +1474,10 @@ void ItaniumVTableBuilder::AddMethods(
       llvm_unreachable("Found a duplicate primary base!");
   }
 
-  const CXXDestructorDecl *ImplicitVirtualDtor = nullptr;
-
   typedef llvm::SmallVector<const CXXMethodDecl *, 8> NewVirtualFunctionsTy;
   NewVirtualFunctionsTy NewVirtualFunctions;
+
+  llvm::SmallVector<const CXXMethodDecl*, 4> NewImplicitVirtualFunctions;
 
   // Now go through all virtual member functions and add them.
   for (const auto *MD : RD->methods()) {
@@ -1542,24 +1542,30 @@ void ItaniumVTableBuilder::AddMethods(
       }
     }
 
-    if (const CXXDestructorDecl *DD = dyn_cast<CXXDestructorDecl>(MD)) {
-      if (MD->isImplicit()) {
-        // Itanium C++ ABI 2.5.2:
-        //   If a class has an implicitly-defined virtual destructor,
-        //   its entries come after the declared virtual function pointers.
-
-        assert(!ImplicitVirtualDtor &&
-               "Did already see an implicit virtual dtor!");
-        ImplicitVirtualDtor = DD;
-        continue;
-      }
-    }
-
-    NewVirtualFunctions.push_back(MD);
+    if (MD->isImplicit())
+      NewImplicitVirtualFunctions.push_back(MD);
+    else
+      NewVirtualFunctions.push_back(MD);
   }
 
-  if (ImplicitVirtualDtor)
-    NewVirtualFunctions.push_back(ImplicitVirtualDtor);
+  std::stable_sort(
+      NewImplicitVirtualFunctions.begin(), NewImplicitVirtualFunctions.end(),
+      [](const CXXMethodDecl *A, const CXXMethodDecl *B) {
+        if (A->isCopyAssignmentOperator() != B->isCopyAssignmentOperator())
+          return A->isCopyAssignmentOperator();
+        if (A->isMoveAssignmentOperator() != B->isMoveAssignmentOperator())
+          return A->isMoveAssignmentOperator();
+        if (isa<CXXDestructorDecl>(A) != isa<CXXDestructorDecl>(B))
+          return isa<CXXDestructorDecl>(A);
+        assert(A->getOverloadedOperator() == OO_EqualEqual &&
+               B->getOverloadedOperator() == OO_EqualEqual &&
+               "unexpected or duplicate implicit virtual function");
+        // We rely on Sema to have declared the operator== members in the
+        // same order as the corresponding operator<=> members.
+        return false;
+      });
+  NewVirtualFunctions.append(NewImplicitVirtualFunctions.begin(),
+                             NewImplicitVirtualFunctions.end());
 
   for (const CXXMethodDecl *MD : NewVirtualFunctions) {
     // Get the final overrider.
@@ -2245,7 +2251,7 @@ ItaniumVTableContext::getVirtualBaseOffsetOffset(const CXXRecordDecl *RD,
   if (I != VirtualBaseClassOffsetOffsets.end())
     return I->second;
 
-  VCallAndVBaseOffsetBuilder Builder(RD, RD, /*FinalOverriders=*/nullptr,
+  VCallAndVBaseOffsetBuilder Builder(RD, RD, /*Overriders=*/nullptr,
                                      BaseSubobject(RD, CharUnits::Zero()),
                                      /*BaseIsVirtual=*/false,
                                      /*OffsetInLayoutClass=*/CharUnits::Zero());
@@ -2268,7 +2274,7 @@ CreateVTableLayout(const ItaniumVTableBuilder &Builder) {
   SmallVector<VTableLayout::VTableThunkTy, 1>
     VTableThunks(Builder.vtable_thunks_begin(), Builder.vtable_thunks_end());
 
-  return llvm::make_unique<VTableLayout>(
+  return std::make_unique<VTableLayout>(
       Builder.VTableIndices, Builder.vtable_components(), VTableThunks,
       Builder.getAddressPoints());
 }
@@ -3253,7 +3259,7 @@ void MicrosoftVTableContext::computeVTablePaths(bool ForVBTables,
 
   // Base case: this subobject has its own vptr.
   if (ForVBTables ? Layout.hasOwnVBPtr() : Layout.hasOwnVFPtr())
-    Paths.push_back(llvm::make_unique<VPtrInfo>(RD));
+    Paths.push_back(std::make_unique<VPtrInfo>(RD));
 
   // Recursive case: get all the vbtables from our bases and remove anything
   // that shares a virtual base.
@@ -3276,7 +3282,7 @@ void MicrosoftVTableContext::computeVTablePaths(bool ForVBTables,
         continue;
 
       // Copy the path and adjust it as necessary.
-      auto P = llvm::make_unique<VPtrInfo>(*BaseInfo);
+      auto P = std::make_unique<VPtrInfo>(*BaseInfo);
 
       // We mangle Base into the path if the path would've been ambiguous and it
       // wasn't already extended with Base.
@@ -3562,7 +3568,7 @@ void MicrosoftVTableContext::computeVTableRelatedInformation(
   const VTableLayout::AddressPointsMapTy EmptyAddressPointsMap;
 
   {
-    auto VFPtrs = llvm::make_unique<VPtrInfoVector>();
+    auto VFPtrs = std::make_unique<VPtrInfoVector>();
     computeVTablePaths(/*ForVBTables=*/false, RD, *VFPtrs);
     computeFullPathsForVFTables(Context, RD, *VFPtrs);
     VFPtrLocations[RD] = std::move(VFPtrs);
@@ -3576,7 +3582,7 @@ void MicrosoftVTableContext::computeVTableRelatedInformation(
     assert(VFTableLayouts.count(id) == 0);
     SmallVector<VTableLayout::VTableThunkTy, 1> VTableThunks(
         Builder.vtable_thunks_begin(), Builder.vtable_thunks_end());
-    VFTableLayouts[id] = llvm::make_unique<VTableLayout>(
+    VFTableLayouts[id] = std::make_unique<VTableLayout>(
         ArrayRef<size_t>{0}, Builder.vtable_components(), VTableThunks,
         EmptyAddressPointsMap);
     Thunks.insert(Builder.thunks_begin(), Builder.thunks_end());
@@ -3668,7 +3674,7 @@ const VirtualBaseInfo &MicrosoftVTableContext::computeVBTableRelatedInformation(
     std::unique_ptr<VirtualBaseInfo> &Entry = VBaseInfo[RD];
     if (Entry)
       return *Entry;
-    Entry = llvm::make_unique<VirtualBaseInfo>();
+    Entry = std::make_unique<VirtualBaseInfo>();
     VBI = Entry.get();
   }
 

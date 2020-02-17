@@ -41,7 +41,8 @@ namespace {
 
 using internal::MatcherDescriptor;
 
-using ConstructorMap = llvm::StringMap<std::unique_ptr<const MatcherDescriptor>>;
+using ConstructorMap =
+    llvm::StringMap<std::unique_ptr<const MatcherDescriptor>>;
 
 class RegistryMaps {
 public:
@@ -71,7 +72,7 @@ void RegistryMaps::registerMatcher(
 
 #define REGISTER_MATCHER_OVERLOAD(name)                                        \
   registerMatcher(#name,                                                       \
-      llvm::make_unique<internal::OverloadedMatcherDescriptor>(name##Callbacks))
+      std::make_unique<internal::OverloadedMatcherDescriptor>(name##Callbacks))
 
 #define SPECIFIC_MATCHER_OVERLOAD(name, Id)                                    \
   static_cast<::clang::ast_matchers::name##_Type##Id>(                         \
@@ -104,10 +105,12 @@ RegistryMaps::RegistryMaps() {
   // equalsNode
 
   REGISTER_OVERLOADED_2(callee);
+  REGISTER_OVERLOADED_2(hasAnyCapture);
   REGISTER_OVERLOADED_2(hasPrefix);
   REGISTER_OVERLOADED_2(hasType);
   REGISTER_OVERLOADED_2(ignoringParens);
   REGISTER_OVERLOADED_2(isDerivedFrom);
+  REGISTER_OVERLOADED_2(isDirectlyDerivedFrom);
   REGISTER_OVERLOADED_2(isSameOrDerivedFrom);
   REGISTER_OVERLOADED_2(loc);
   REGISTER_OVERLOADED_2(pointsTo);
@@ -169,6 +172,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(cxxConstructorDecl);
   REGISTER_MATCHER(cxxConversionDecl);
   REGISTER_MATCHER(cxxCtorInitializer);
+  REGISTER_MATCHER(cxxDeductionGuideDecl);
   REGISTER_MATCHER(cxxDefaultArgExpr);
   REGISTER_MATCHER(cxxDeleteExpr);
   REGISTER_MATCHER(cxxDependentScopeMemberExpr);
@@ -267,6 +271,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(hasEitherOperand);
   REGISTER_MATCHER(hasElementType);
   REGISTER_MATCHER(hasElse);
+  REGISTER_MATCHER(hasExplicitSpecifier);
   REGISTER_MATCHER(hasExternalFormalLinkage);
   REGISTER_MATCHER(hasFalseExpression);
   REGISTER_MATCHER(hasGlobalStorage);
@@ -276,6 +281,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(hasIndex);
   REGISTER_MATCHER(hasInit);
   REGISTER_MATCHER(hasInitializer);
+  REGISTER_MATCHER(hasInitStatement);
   REGISTER_MATCHER(hasKeywordSelector);
   REGISTER_MATCHER(hasLHS);
   REGISTER_MATCHER(hasLocalQualifiers);
@@ -320,6 +326,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(hasUnqualifiedDesugaredType);
   REGISTER_MATCHER(hasValueType);
   REGISTER_MATCHER(ifStmt);
+  REGISTER_MATCHER(ignoringElidableConstructorCall);
   REGISTER_MATCHER(ignoringImpCasts);
   REGISTER_MATCHER(ignoringImplicit);
   REGISTER_MATCHER(ignoringParenCasts);
@@ -450,6 +457,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(on);
   REGISTER_MATCHER(onImplicitObjectArgument);
   REGISTER_MATCHER(opaqueValueExpr);
+  REGISTER_MATCHER(optionally);
   REGISTER_MATCHER(parameterCountIs);
   REGISTER_MATCHER(parenExpr);
   REGISTER_MATCHER(parenListExpr);

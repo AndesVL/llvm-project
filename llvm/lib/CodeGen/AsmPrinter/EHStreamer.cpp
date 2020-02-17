@@ -378,7 +378,8 @@ MCSymbol *EHStreamer::emitExceptionTable() {
   bool IsSJLJ = Asm->MAI->getExceptionHandlingType() == ExceptionHandling::SjLj;
   bool IsWasm = Asm->MAI->getExceptionHandlingType() == ExceptionHandling::Wasm;
   unsigned CallSiteEncoding =
-      IsSJLJ ? dwarf::DW_EH_PE_udata4 : dwarf::DW_EH_PE_uleb128;
+      IsSJLJ ? static_cast<unsigned>(dwarf::DW_EH_PE_udata4) :
+               Asm->getObjFileLowering().getCallSiteEncoding();
   bool HaveTTData = !TypeInfos.empty() || !FilterIds.empty();
 
   // Type infos.
@@ -425,7 +426,7 @@ MCSymbol *EHStreamer::emitExceptionTable() {
   // EHABI). In this case LSDASection will be NULL.
   if (LSDASection)
     Asm->OutStreamer->SwitchSection(LSDASection);
-  Asm->EmitAlignment(2);
+  Asm->EmitAlignment(Align(4));
 
   // Emit the LSDA.
   MCSymbol *GCCETSym =
@@ -523,24 +524,52 @@ MCSymbol *EHStreamer::emitExceptionTable() {
       // Offset of the call site relative to the start of the procedure.
       if (VerboseAsm)
         Asm->OutStreamer->AddComment(">> Call Site " + Twine(++Entry) + " <<");
-      Asm->EmitLabelDifferenceAsULEB128(BeginLabel, EHFuncBeginSym);
+      Asm->EmitCallSiteOffset(BeginLabel, EHFuncBeginSym, CallSiteEncoding);
       if (VerboseAsm)
         Asm->OutStreamer->AddComment(Twine("  Call between ") +
                                      BeginLabel->getName() + " and " +
                                      EndLabel->getName());
-      Asm->EmitLabelDifferenceAsULEB128(EndLabel, BeginLabel);
+      Asm->EmitCallSiteOffset(EndLabel, BeginLabel, CallSiteEncoding);
 
+      const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
+      const bool IsPurecap = TLOF.isCheriPurecapABI();
       // Offset of the landing pad relative to the start of the procedure.
       if (!S.LPad) {
         if (VerboseAsm)
           Asm->OutStreamer->AddComment("    has no landing pad");
-        Asm->EmitULEB128(0);
+
+        Asm->EmitCallSiteValue(0, CallSiteEncoding);
       } else {
+        if (IsPurecap) {
+          // In order to avoid having to pad to capability alignment and use
+          // a full capability for the no landing pad case, we emit a 0xc byte
+          // here to indicate that there is a valid capability at the next
+          // capability-aligned location.
+          Asm->OutStreamer->AddComment("(landing pad is a capability)");
+          Asm->EmitCallSiteValue(0xc, CallSiteEncoding);
+        }
+
         if (VerboseAsm)
           Asm->OutStreamer->AddComment(Twine("    jumps to ") +
                                        S.LPad->LandingPadLabel->getName());
-        Asm->EmitLabelDifferenceAsULEB128(S.LPad->LandingPadLabel,
-                                          EHFuncBeginSym);
+        if (IsPurecap) {
+          // For purecap we currently emit a capability relocation for the
+          // landing pad target since the saved PC value will be an immutable
+          // sentry capability which does not allow adding an offset.
+          // Get the Hi-Lo expression.
+          const MCExpr *DiffToStart = MCBinaryExpr::createSub(
+              MCSymbolRefExpr::create(S.LPad->LandingPadLabel, Asm->OutContext),
+              MCSymbolRefExpr::create(EHFuncBeginSym, Asm->OutContext),
+              Asm->OutContext);
+          // Note: we cannot use EHFuncBeginSym here since that is a local
+          // symbol and then EmitCheriCapability() will create a relocation
+          // against section plus offset rather than function + offset
+          Asm->OutStreamer->EmitCheriCapability(Asm->CurrentFnSym, DiffToStart,
+                                                TLOF.getCheriCapabilitySize());
+        } else {
+          Asm->EmitCallSiteOffset(S.LPad->LandingPadLabel, EHFuncBeginSym,
+                                  CallSiteEncoding);
+        }
       }
 
       // Offset of the first associated action record, relative to the start of
@@ -601,11 +630,11 @@ MCSymbol *EHStreamer::emitExceptionTable() {
   }
 
   if (HaveTTData) {
-    Asm->EmitAlignment(2);
+    Asm->EmitAlignment(Align(4));
     emitTypeInfos(TTypeEncoding, TTBaseLabel);
   }
 
-  Asm->EmitAlignment(2);
+  Asm->EmitAlignment(Align(4));
   return GCCETSym;
 }
 

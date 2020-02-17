@@ -491,7 +491,7 @@ class NodeRef {
   struct CacheAlignedPointerTraits {
     static inline void *getAsVoidPointer(void *P) { return P; }
     static inline void *getFromVoidPointer(void *P) { return P; }
-    enum { NumLowBitsAvailable = Log2CacheLine };
+    static constexpr int NumLowBitsAvailable = Log2CacheLine;
   };
   PointerIntPair<void*, Log2CacheLine, unsigned, CacheAlignedPointerTraits> pip;
 
@@ -963,8 +963,8 @@ public:
 
 private:
   // The root data is either a RootLeaf or a RootBranchData instance.
-  LLVM_ALIGNAS(RootLeaf) LLVM_ALIGNAS(RootBranchData)
-  AlignedCharArrayUnion<RootLeaf, RootBranchData> data;
+  alignas(RootLeaf) alignas(RootBranchData)
+      AlignedCharArrayUnion<RootLeaf, RootBranchData> data;
 
   // Tree height.
   // 0: Leaves in root.

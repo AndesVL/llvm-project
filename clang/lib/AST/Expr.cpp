@@ -49,7 +49,7 @@ const Expr *Expr::getBestDynamicClassTypeExpr() const {
 
     // Step into initializer for materialized temporaries.
     if (auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E)) {
-      E = MTE->GetTemporaryExpr();
+      E = MTE->getSubExpr();
       continue;
     }
 
@@ -85,8 +85,8 @@ const Expr *Expr::skipRValueSubobjectAdjustments(
            CE->getCastKind() == CK_UncheckedDerivedToBase) &&
           E->getType()->isRecordType()) {
         E = CE->getSubExpr();
-        CXXRecordDecl *Derived
-          = cast<CXXRecordDecl>(E->getType()->getAs<RecordType>()->getDecl());
+        auto *Derived =
+            cast<CXXRecordDecl>(E->getType()->castAs<RecordType>()->getDecl());
         Adjustments.push_back(SubobjectAdjustment(CE, Derived));
         continue;
       }
@@ -127,11 +127,7 @@ const Expr *Expr::skipRValueSubobjectAdjustments(
   return E;
 }
 
-/// isKnownToHaveBooleanValue - Return true if this is an integer expression
-/// that is known to return 0 or 1.  This happens for _Bool/bool expressions
-/// but also int expressions which are produced by things like comparisons in
-/// C.
-bool Expr::isKnownToHaveBooleanValue() const {
+bool Expr::isKnownToHaveBooleanValue(bool Semantic) const {
   const Expr *E = IgnoreParens();
 
   // If this value has _Bool type, it is obvious 0/1.
@@ -142,7 +138,7 @@ bool Expr::isKnownToHaveBooleanValue() const {
   if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(E)) {
     switch (UO->getOpcode()) {
     case UO_Plus:
-      return UO->getSubExpr()->isKnownToHaveBooleanValue();
+      return UO->getSubExpr()->isKnownToHaveBooleanValue(Semantic);
     case UO_LNot:
       return true;
     default:
@@ -152,8 +148,9 @@ bool Expr::isKnownToHaveBooleanValue() const {
 
   // Only look through implicit casts.  If the user writes
   // '(int) (a && b)' treat it as an arbitrary int.
+  // FIXME: Should we look through any cast expression in !Semantic mode?
   if (const ImplicitCastExpr *CE = dyn_cast<ImplicitCastExpr>(E))
-    return CE->getSubExpr()->isKnownToHaveBooleanValue();
+    return CE->getSubExpr()->isKnownToHaveBooleanValue(Semantic);
 
   if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
     switch (BO->getOpcode()) {
@@ -172,18 +169,30 @@ bool Expr::isKnownToHaveBooleanValue() const {
     case BO_Xor:  // Bitwise XOR operator.
     case BO_Or:   // Bitwise OR operator.
       // Handle things like (x==2)|(y==12).
-      return BO->getLHS()->isKnownToHaveBooleanValue() &&
-             BO->getRHS()->isKnownToHaveBooleanValue();
+      return BO->getLHS()->isKnownToHaveBooleanValue(Semantic) &&
+             BO->getRHS()->isKnownToHaveBooleanValue(Semantic);
 
     case BO_Comma:
     case BO_Assign:
-      return BO->getRHS()->isKnownToHaveBooleanValue();
+      return BO->getRHS()->isKnownToHaveBooleanValue(Semantic);
     }
   }
 
   if (const ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E))
-    return CO->getTrueExpr()->isKnownToHaveBooleanValue() &&
-           CO->getFalseExpr()->isKnownToHaveBooleanValue();
+    return CO->getTrueExpr()->isKnownToHaveBooleanValue(Semantic) &&
+           CO->getFalseExpr()->isKnownToHaveBooleanValue(Semantic);
+
+  if (isa<ObjCBoolLiteralExpr>(E))
+    return true;
+
+  if (const auto *OVE = dyn_cast<OpaqueValueExpr>(E))
+    return OVE->getSourceExpr()->isKnownToHaveBooleanValue(Semantic);
+
+  if (const FieldDecl *FD = E->getSourceBitField())
+    if (!Semantic && FD->getType()->isUnsignedIntegerType() &&
+        !FD->getBitWidth()->isValueDependent() &&
+        FD->getBitWidthValue(FD->getASTContext()) == 1)
+      return true;
 
   return false;
 }
@@ -228,6 +237,133 @@ SourceLocation Expr::getExprLoc() const {
 //===----------------------------------------------------------------------===//
 // Primary Expressions.
 //===----------------------------------------------------------------------===//
+
+static void AssertResultStorageKind(ConstantExpr::ResultStorageKind Kind) {
+  assert((Kind == ConstantExpr::RSK_APValue ||
+          Kind == ConstantExpr::RSK_Int64 || Kind == ConstantExpr::RSK_None) &&
+         "Invalid StorageKind Value");
+}
+
+ConstantExpr::ResultStorageKind
+ConstantExpr::getStorageKind(const APValue &Value) {
+  switch (Value.getKind()) {
+  case APValue::None:
+  case APValue::Indeterminate:
+    return ConstantExpr::RSK_None;
+  case APValue::Int:
+    if (!Value.getInt().needsCleanup())
+      return ConstantExpr::RSK_Int64;
+    LLVM_FALLTHROUGH;
+  default:
+    return ConstantExpr::RSK_APValue;
+  }
+}
+
+ConstantExpr::ResultStorageKind
+ConstantExpr::getStorageKind(const Type *T, const ASTContext &Context) {
+  if (T->isIntegralOrEnumerationType() && Context.getTypeInfo(T).Width <= 64)
+    return ConstantExpr::RSK_Int64;
+  return ConstantExpr::RSK_APValue;
+}
+
+void ConstantExpr::DefaultInit(ResultStorageKind StorageKind) {
+  ConstantExprBits.ResultKind = StorageKind;
+  ConstantExprBits.APValueKind = APValue::None;
+  ConstantExprBits.HasCleanup = false;
+  if (StorageKind == ConstantExpr::RSK_APValue)
+    ::new (getTrailingObjects<APValue>()) APValue();
+}
+
+ConstantExpr::ConstantExpr(Expr *subexpr, ResultStorageKind StorageKind)
+    : FullExpr(ConstantExprClass, subexpr) {
+  DefaultInit(StorageKind);
+}
+
+ConstantExpr *ConstantExpr::Create(const ASTContext &Context, Expr *E,
+                                   ResultStorageKind StorageKind) {
+  assert(!isa<ConstantExpr>(E));
+  AssertResultStorageKind(StorageKind);
+  unsigned Size = totalSizeToAlloc<APValue, uint64_t>(
+      StorageKind == ConstantExpr::RSK_APValue,
+      StorageKind == ConstantExpr::RSK_Int64);
+  void *Mem = Context.Allocate(Size, alignof(ConstantExpr));
+  ConstantExpr *Self = new (Mem) ConstantExpr(E, StorageKind);
+  return Self;
+}
+
+ConstantExpr *ConstantExpr::Create(const ASTContext &Context, Expr *E,
+                                   const APValue &Result) {
+  ResultStorageKind StorageKind = getStorageKind(Result);
+  ConstantExpr *Self = Create(Context, E, StorageKind);
+  Self->SetResult(Result, Context);
+  return Self;
+}
+
+ConstantExpr::ConstantExpr(ResultStorageKind StorageKind, EmptyShell Empty)
+    : FullExpr(ConstantExprClass, Empty) {
+  DefaultInit(StorageKind);
+}
+
+ConstantExpr *ConstantExpr::CreateEmpty(const ASTContext &Context,
+                                        ResultStorageKind StorageKind,
+                                        EmptyShell Empty) {
+  AssertResultStorageKind(StorageKind);
+  unsigned Size = totalSizeToAlloc<APValue, uint64_t>(
+      StorageKind == ConstantExpr::RSK_APValue,
+      StorageKind == ConstantExpr::RSK_Int64);
+  void *Mem = Context.Allocate(Size, alignof(ConstantExpr));
+  ConstantExpr *Self = new (Mem) ConstantExpr(StorageKind, Empty);
+  return Self;
+}
+
+void ConstantExpr::MoveIntoResult(APValue &Value, const ASTContext &Context) {
+  assert(getStorageKind(Value) == ConstantExprBits.ResultKind &&
+         "Invalid storage for this value kind");
+  ConstantExprBits.APValueKind = Value.getKind();
+  switch (ConstantExprBits.ResultKind) {
+  case RSK_None:
+    return;
+  case RSK_Int64:
+    Int64Result() = *Value.getInt().getRawData();
+    ConstantExprBits.BitWidth = Value.getInt().getBitWidth();
+    ConstantExprBits.IsUnsigned = Value.getInt().isUnsigned();
+    return;
+  case RSK_APValue:
+    if (!ConstantExprBits.HasCleanup && Value.needsCleanup()) {
+      ConstantExprBits.HasCleanup = true;
+      Context.addDestruction(&APValueResult());
+    }
+    APValueResult() = std::move(Value);
+    return;
+  }
+  llvm_unreachable("Invalid ResultKind Bits");
+}
+
+llvm::APSInt ConstantExpr::getResultAsAPSInt() const {
+  switch (ConstantExprBits.ResultKind) {
+  case ConstantExpr::RSK_APValue:
+    return APValueResult().getInt();
+  case ConstantExpr::RSK_Int64:
+    return llvm::APSInt(llvm::APInt(ConstantExprBits.BitWidth, Int64Result()),
+                        ConstantExprBits.IsUnsigned);
+  default:
+    llvm_unreachable("invalid Accessor");
+  }
+}
+
+APValue ConstantExpr::getAPValueResult() const {
+  switch (ConstantExprBits.ResultKind) {
+  case ConstantExpr::RSK_APValue:
+    return APValueResult();
+  case ConstantExpr::RSK_Int64:
+    return APValue(
+        llvm::APSInt(llvm::APInt(ConstantExprBits.BitWidth, Int64Result()),
+                     ConstantExprBits.IsUnsigned));
+  case ConstantExpr::RSK_None:
+    return APValue();
+  }
+  llvm_unreachable("invalid ResultKind");
+}
 
 /// Compute the type-, value-, and instantiation-dependence of a
 /// declaration reference
@@ -840,7 +976,7 @@ FloatingLiteral::FloatingLiteral(const ASTContext &C, const llvm::APFloat &V,
 
 FloatingLiteral::FloatingLiteral(const ASTContext &C, EmptyShell Empty)
   : Expr(FloatingLiteralClass, Empty) {
-  setRawSemantics(IEEEhalf);
+  setRawSemantics(llvm::APFloatBase::S_IEEEhalf);
   FloatingLiteralBits.IsExact = false;
 }
 
@@ -853,41 +989,6 @@ FloatingLiteral::Create(const ASTContext &C, const llvm::APFloat &V,
 FloatingLiteral *
 FloatingLiteral::Create(const ASTContext &C, EmptyShell Empty) {
   return new (C) FloatingLiteral(C, Empty);
-}
-
-const llvm::fltSemantics &FloatingLiteral::getSemantics() const {
-  switch(FloatingLiteralBits.Semantics) {
-  case IEEEhalf:
-    return llvm::APFloat::IEEEhalf();
-  case IEEEsingle:
-    return llvm::APFloat::IEEEsingle();
-  case IEEEdouble:
-    return llvm::APFloat::IEEEdouble();
-  case x87DoubleExtended:
-    return llvm::APFloat::x87DoubleExtended();
-  case IEEEquad:
-    return llvm::APFloat::IEEEquad();
-  case PPCDoubleDouble:
-    return llvm::APFloat::PPCDoubleDouble();
-  }
-  llvm_unreachable("Unrecognised floating semantics");
-}
-
-void FloatingLiteral::setSemantics(const llvm::fltSemantics &Sem) {
-  if (&Sem == &llvm::APFloat::IEEEhalf())
-    FloatingLiteralBits.Semantics = IEEEhalf;
-  else if (&Sem == &llvm::APFloat::IEEEsingle())
-    FloatingLiteralBits.Semantics = IEEEsingle;
-  else if (&Sem == &llvm::APFloat::IEEEdouble())
-    FloatingLiteralBits.Semantics = IEEEdouble;
-  else if (&Sem == &llvm::APFloat::x87DoubleExtended())
-    FloatingLiteralBits.Semantics = x87DoubleExtended;
-  else if (&Sem == &llvm::APFloat::IEEEquad())
-    FloatingLiteralBits.Semantics = IEEEquad;
-  else if (&Sem == &llvm::APFloat::PPCDoubleDouble())
-    FloatingLiteralBits.Semantics = PPCDoubleDouble;
-  else
-    llvm_unreachable("Unknown floating semantics");
 }
 
 /// getValueAsApproximateDouble - This returns the value as an inaccurate
@@ -1577,6 +1678,15 @@ MemberExpr *MemberExpr::Create(
   MemberExpr *E = new (Mem) MemberExpr(Base, IsArrow, OperatorLoc, MemberDecl,
                                        NameInfo, T, VK, OK, NOUR);
 
+  if (isa<FieldDecl>(MemberDecl)) {
+    DeclContext *DC = MemberDecl->getDeclContext();
+    // dyn_cast_or_null is used to handle objC variables which do not
+    // have a declaration context.
+    CXXRecordDecl *RD = dyn_cast_or_null<CXXRecordDecl>(DC);
+    if (RD && RD->isDependentContext() && RD->isCurrentInstantiation(DC))
+      E->setTypeDependent(T->isDependentType());
+  }
+
   if (HasQualOrFound) {
     // FIXME: Wrong. We should be looking at the member declaration we found.
     if (QualifierLoc && QualifierLoc.getNestedNameSpecifier()->isDependent()) {
@@ -1732,7 +1842,7 @@ bool CastExpr::CastConsistency() const {
     auto Ty = getType();
     auto SETy = getSubExpr()->getType();
     assert(getValueKindForType(Ty) == Expr::getValueKindForType(SETy));
-    if (/*isRValue()*/ !Ty->getPointeeType().isNull()) {
+    if (isRValue()) {
       Ty = Ty->getPointeeType();
       SETy = SETy->getPointeeType();
     }
@@ -1806,6 +1916,7 @@ bool CastExpr::CastConsistency() const {
   case CK_FloatingComplexToBoolean:
   case CK_IntegralComplexToBoolean:
   case CK_LValueBitCast:            // -> bool&
+  case CK_LValueToRValueBitCast:
   case CK_UserDefinedConversion:    // operator bool()
   case CK_BuiltinFnToFnPtr:
   case CK_FixedPointToBoolean:
@@ -1828,7 +1939,7 @@ namespace {
   const Expr *skipImplicitTemporary(const Expr *E) {
     // Skip through reference binding to temporary.
     if (auto *Materialize = dyn_cast<MaterializeTemporaryExpr>(E))
-      E = Materialize->GetTemporaryExpr();
+      E = Materialize->getSubExpr();
 
     // Skip any temporary bindings; they're implicit.
     if (auto *Binder = dyn_cast<CXXBindTemporaryExpr>(E))
@@ -1915,12 +2026,59 @@ const FieldDecl *CastExpr::getTargetFieldForToUnionCast(const RecordDecl *RD,
   return nullptr;
 }
 
+void CastExpr::checkProvenance(const ASTContext &C, QualType *Dst,
+                               class Expr *Src) {
+  if (!(*Dst)->isIntCapType())
+    return;
+
+  if (!(*Dst)->canCarryProvenance(C))
+    return;  // avoid doubly-annotating a type
+
+  // If we are casting an definitely not-provenance carrying value to a
+  // (u)intcap_t, mark the result as not carrying provenance.
+  const QualType ExprTy = Src->getType();
+  // If the source type does not carry provenance, the result can't either.
+  bool ExprCanCarryProvenance = ExprTy->canCarryProvenance(C);
+  if (ExprCanCarryProvenance && ExprTy->isEnumeralType()) {
+    // References to enum constants can never carry provenance (even if the
+    // underlying type of the enumeration is __uintcap_t)
+    // TODO: Should uintcap_t enumerations be an error? Or do we warn and
+    //  implicitly convert them to the matching address type?
+    if (auto *DRE = dyn_cast<DeclRefExpr>(Src->IgnoreCasts())) {
+      if (isa<EnumConstantDecl>(DRE->getFoundDecl()))
+        ExprCanCarryProvenance = false;
+    }
+  }
+  // NULL pointers are untagged values
+  // FIXME: change isNullPointerConstant to take a const astctx.
+  if (ExprCanCarryProvenance &&
+      Src->isNullPointerConstant(const_cast<ASTContext &>(C), NPC_NeverValueDependent))
+    ExprCanCarryProvenance = false;
+
+  if (!ExprCanCarryProvenance) {
+    // FIXME: allowing __uintcap_t as the underlying type for enums is not
+    // ideal, as this means we need a const_cast here.
+    if ((*Dst)->isEnumeralType()) {
+      *Dst = const_cast<ASTContext &>(C).getAttributedType(
+          attr::CHERINoProvenance, *Dst, *Dst);
+    } else {
+      *Dst = C.getNonProvenanceCarryingType(*Dst);
+    }
+  }
+}
+
 ImplicitCastExpr *ImplicitCastExpr::Create(const ASTContext &C, QualType T,
                                            CastKind Kind, Expr *Operand,
                                            const CXXCastPath *BasePath,
                                            ExprValueKind VK) {
   unsigned PathSize = (BasePath ? BasePath->size() : 0);
   void *Buffer = C.Allocate(totalSizeToAlloc<CXXBaseSpecifier *>(PathSize));
+  // Per C++ [conv.lval]p3, lvalue-to-rvalue conversions on class and
+  // std::nullptr_t have special semantics not captured by CK_LValueToRValue.
+  assert((Kind != CK_LValueToRValue ||
+          !(T->isNullPtrType() || T->getAsCXXRecordDecl())) &&
+         "invalid type for lvalue-to-rvalue conversion");
+  checkProvenance(C, &T, Operand);
   ImplicitCastExpr *E =
     new (Buffer) ImplicitCastExpr(T, Kind, Operand, PathSize, VK);
   if (PathSize)
@@ -1943,6 +2101,7 @@ CStyleCastExpr *CStyleCastExpr::Create(const ASTContext &C, QualType T,
                                        SourceLocation L, SourceLocation R) {
   unsigned PathSize = (BasePath ? BasePath->size() : 0);
   void *Buffer = C.Allocate(totalSizeToAlloc<CXXBaseSpecifier *>(PathSize));
+  checkProvenance(C, &T, Op);
   CStyleCastExpr *E =
     new (Buffer) CStyleCastExpr(T, VK, K, Op, PathSize, WrittenTy, L, R);
   if (PathSize)
@@ -2139,7 +2298,7 @@ APValue SourceLocExpr::EvaluateInContext(const ASTContext &Ctx,
   case SourceLocExpr::Line:
   case SourceLocExpr::Column: {
     llvm::APSInt IntVal(Ctx.getIntWidth(Ctx.UnsignedIntTy),
-                        /*IsUnsigned=*/true);
+                        /*isUnsigned=*/true);
     IntVal = getIdentKind() == SourceLocExpr::Line ? PLoc.getLine()
                                                    : PLoc.getColumn();
     return APValue(IntVal);
@@ -2241,11 +2400,11 @@ bool InitListExpr::isTransparent() const {
 bool InitListExpr::isIdiomaticZeroInitializer(const LangOptions &LangOpts) const {
   assert(isSyntacticForm() && "only test syntactic form as zero initializer");
 
-  if (LangOpts.CPlusPlus || getNumInits() != 1) {
+  if (LangOpts.CPlusPlus || getNumInits() != 1 || !getInit(0)) {
     return false;
   }
 
-  const IntegerLiteral *Lit = dyn_cast<IntegerLiteral>(getInit(0));
+  const IntegerLiteral *Lit = dyn_cast<IntegerLiteral>(getInit(0)->IgnoreImplicit());
   return Lit && Lit->getValue() == 0;
 }
 
@@ -2416,12 +2575,13 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
     // If only one of the LHS or RHS is a warning, the operator might
     // be being used for control flow. Only warn if both the LHS and
     // RHS are warnings.
-    const ConditionalOperator *Exp = cast<ConditionalOperator>(this);
-    if (!Exp->getRHS()->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx))
-      return false;
-    if (!Exp->getLHS())
-      return true;
-    return Exp->getLHS()->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
+    const auto *Exp = cast<ConditionalOperator>(this);
+    return Exp->getLHS()->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx) &&
+           Exp->getRHS()->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
+  }
+  case BinaryConditionalOperatorClass: {
+    const auto *Exp = cast<BinaryConditionalOperator>(this);
+    return Exp->getFalseExpr()->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
   }
 
   case MemberExprClass:
@@ -2501,13 +2661,31 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
   case CXXTemporaryObjectExprClass:
   case CXXConstructExprClass: {
     if (const CXXRecordDecl *Type = getType()->getAsCXXRecordDecl()) {
-      if (Type->hasAttr<WarnUnusedAttr>()) {
+      const auto *WarnURAttr = Type->getAttr<WarnUnusedResultAttr>();
+      if (Type->hasAttr<WarnUnusedAttr>() ||
+          (WarnURAttr && WarnURAttr->IsCXX11NoDiscard())) {
         WarnE = this;
         Loc = getBeginLoc();
         R1 = getSourceRange();
         return true;
       }
     }
+
+    const auto *CE = cast<CXXConstructExpr>(this);
+    if (const CXXConstructorDecl *Ctor = CE->getConstructor()) {
+      const auto *WarnURAttr = Ctor->getAttr<WarnUnusedResultAttr>();
+      if (WarnURAttr && WarnURAttr->IsCXX11NoDiscard()) {
+        WarnE = this;
+        Loc = getBeginLoc();
+        R1 = getSourceRange();
+
+        if (unsigned NumArgs = CE->getNumArgs())
+          R2 = SourceRange(CE->getArg(0)->getBeginLoc(),
+                           CE->getArg(NumArgs - 1)->getEndLoc());
+        return true;
+      }
+    }
+
     return false;
   }
 
@@ -2635,8 +2813,9 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
   case CXXDeleteExprClass:
     return false;
   case MaterializeTemporaryExprClass:
-    return cast<MaterializeTemporaryExpr>(this)->GetTemporaryExpr()
-               ->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
+    return cast<MaterializeTemporaryExpr>(this)
+        ->getSubExpr()
+        ->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
   case CXXBindTemporaryExprClass:
     return cast<CXXBindTemporaryExpr>(this)->getSubExpr()
                ->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
@@ -2660,8 +2839,8 @@ bool Expr::isOBJCGCCandidate(ASTContext &Ctx) const {
   case ImplicitCastExprClass:
     return cast<ImplicitCastExpr>(E)->getSubExpr()->isOBJCGCCandidate(Ctx);
   case MaterializeTemporaryExprClass:
-    return cast<MaterializeTemporaryExpr>(E)->GetTemporaryExpr()
-                                                      ->isOBJCGCCandidate(Ctx);
+    return cast<MaterializeTemporaryExpr>(E)->getSubExpr()->isOBJCGCCandidate(
+        Ctx);
   case CStyleCastExprClass:
     return cast<CStyleCastExpr>(E)->getSubExpr()->isOBJCGCCandidate(Ctx);
   case DeclRefExprClass: {
@@ -2736,7 +2915,7 @@ static Expr *IgnoreImpCastsExtraSingleStep(Expr *E) {
     return SubE;
 
   if (auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E))
-    return MTE->GetTemporaryExpr();
+    return MTE->getSubExpr();
 
   if (auto *NTTP = dyn_cast<SubstNonTypeTemplateParmExpr>(E))
     return NTTP->getReplacement();
@@ -2752,7 +2931,7 @@ static Expr *IgnoreCastsSingleStep(Expr *E) {
     return FE->getSubExpr();
 
   if (auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E))
-    return MTE->GetTemporaryExpr();
+    return MTE->getSubExpr();
 
   if (auto *NTTP = dyn_cast<SubstNonTypeTemplateParmExpr>(E))
     return NTTP->getReplacement();
@@ -2786,11 +2965,25 @@ static Expr *IgnoreImplicitSingleStep(Expr *E) {
     return SubE;
 
   if (auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E))
-    return MTE->GetTemporaryExpr();
+    return MTE->getSubExpr();
 
   if (auto *BTE = dyn_cast<CXXBindTemporaryExpr>(E))
     return BTE->getSubExpr();
 
+  return E;
+}
+
+static Expr *IgnoreImplicitAsWrittenSingleStep(Expr *E) {
+  if (auto *ICE = dyn_cast<ImplicitCastExpr>(E))
+    return ICE->getSubExprAsWritten();
+
+  return IgnoreImplicitSingleStep(E);
+}
+
+static Expr *IgnoreParensOnlySingleStep(Expr *E) {
+  if (auto *PE = dyn_cast<ParenExpr>(E))
+    if (!isa<NoChangeBoundsExpr>(E))
+      return PE->getSubExpr();
   return E;
 }
 
@@ -2885,6 +3078,10 @@ Expr *Expr::IgnoreImplicit() {
   return IgnoreExprNodes(this, IgnoreImplicitSingleStep);
 }
 
+Expr *Expr::IgnoreImplicitAsWritten() {
+  return IgnoreExprNodes(this, IgnoreImplicitAsWrittenSingleStep);
+}
+
 Expr *Expr::IgnoreParens() {
   return IgnoreExprNodes(this, IgnoreParensSingleStep);
 }
@@ -2927,10 +3124,39 @@ Expr *Expr::IgnoreParenNoopCasts(const ASTContext &Ctx) {
   });
 }
 
+Expr *Expr::IgnoreUnlessSpelledInSource() {
+  Expr *E = this;
+
+  Expr *LastE = nullptr;
+  while (E != LastE) {
+    LastE = E;
+    E = IgnoreExprNodes(E, IgnoreImplicitSingleStep, IgnoreImpCastsSingleStep,
+                        IgnoreParensOnlySingleStep);
+
+    auto SR = E->getSourceRange();
+
+    if (auto *C = dyn_cast<CXXConstructExpr>(E)) {
+      if (C->getNumArgs() == 1) {
+        Expr *A = C->getArg(0);
+        if (A->getSourceRange() == SR || !isa<CXXTemporaryObjectExpr>(C))
+          E = A;
+      }
+    }
+
+    if (auto *C = dyn_cast<CXXMemberCallExpr>(E)) {
+      Expr *ExprNode = C->getImplicitObjectArgument()->IgnoreParenImpCasts();
+      if (ExprNode->getSourceRange() == SR)
+        E = ExprNode;
+    }
+  }
+
+  return E;
+}
+
 bool Expr::isDefaultArgument() const {
   const Expr *E = this;
   if (const MaterializeTemporaryExpr *M = dyn_cast<MaterializeTemporaryExpr>(E))
-    E = M->GetTemporaryExpr();
+    E = M->getSubExpr();
 
   while (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E))
     E = ICE->getSubExprAsWritten();
@@ -2942,7 +3168,7 @@ bool Expr::isDefaultArgument() const {
 /// expressions.
 static const Expr *skipTemporaryBindingsNoOpCastsAndParens(const Expr *E) {
   if (const MaterializeTemporaryExpr *M = dyn_cast<MaterializeTemporaryExpr>(E))
-    E = M->GetTemporaryExpr();
+    E = M->getSubExpr();
 
   while (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E)) {
     if (ICE->getCastKind() == CK_NoOp)
@@ -3037,7 +3263,7 @@ bool Expr::isImplicitCXXThis() const {
 
     if (const MaterializeTemporaryExpr *M
                                       = dyn_cast<MaterializeTemporaryExpr>(E)) {
-      E = M->GetTemporaryExpr();
+      E = M->getSubExpr();
       continue;
     }
 
@@ -3136,7 +3362,7 @@ bool Expr::isConstantInitializer(ASTContext &Ctx, bool IsForRef,
 
     if (ILE->getType()->isRecordType()) {
       unsigned ElementNo = 0;
-      RecordDecl *RD = ILE->getType()->getAs<RecordType>()->getDecl();
+      RecordDecl *RD = ILE->getType()->castAs<RecordType>()->getDecl();
       for (const auto *Field : RD->fields()) {
         // If this is a union, skip all the fields that aren't being initialized.
         if (RD->isUnion() && ILE->getInitializedFieldInUnion() != Field)
@@ -3215,8 +3441,9 @@ bool Expr::isConstantInitializer(ASTContext &Ctx, bool IsForRef,
     break;
   }
   case MaterializeTemporaryExprClass:
-    return cast<MaterializeTemporaryExpr>(this)->GetTemporaryExpr()
-      ->isConstantInitializer(Ctx, false, Culprit);
+    return cast<MaterializeTemporaryExpr>(this)
+        ->getSubExpr()
+        ->isConstantInitializer(Ctx, false, Culprit);
 
   case SubstNonTypeTemplateParmExprClass:
     return cast<SubstNonTypeTemplateParmExpr>(this)->getReplacement()
@@ -3335,6 +3562,8 @@ bool Expr::HasSideEffects(const ASTContext &Ctx,
   case CXXUuidofExprClass:
   case OpaqueValueExprClass:
   case SourceLocExprClass:
+  case ConceptSpecializationExprClass:
+  case RequiresExprClass:
     // These never have a side-effect.
     return false;
 
@@ -3405,6 +3634,7 @@ bool Expr::HasSideEffects(const ASTContext &Ctx,
   case ArrayInitLoopExprClass:
   case ParenListExprClass:
   case CXXPseudoDestructorExprClass:
+  case CXXRewrittenBinaryOperatorClass:
   case CXXStdInitializerListExprClass:
   case SubstNonTypeTemplateParmExprClass:
   case MaterializeTemporaryExprClass:
@@ -3464,7 +3694,8 @@ bool Expr::HasSideEffects(const ASTContext &Ctx,
   case CXXStaticCastExprClass:
   case CXXReinterpretCastExprClass:
   case CXXConstCastExprClass:
-  case CXXFunctionalCastExprClass: {
+  case CXXFunctionalCastExprClass:
+  case BuiltinBitCastExprClass: {
     // While volatile reads are side-effecting in both C and C++, we treat them
     // as having possible (not definite) side-effects. This allows idiomatic
     // code to behave without warning, such as sizeof(*v) for a volatile-
@@ -3681,7 +3912,7 @@ Expr::isNullPointerConstant(ASTContext &Ctx,
     return NPCK_GNUNull;
   } else if (const MaterializeTemporaryExpr *M
                                    = dyn_cast<MaterializeTemporaryExpr>(this)) {
-    return M->GetTemporaryExpr()->isNullPointerConstant(Ctx, NPC);
+    return M->getSubExpr()->isNullPointerConstant(Ctx, NPC);
   } else if (const OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(this)) {
     if (const Expr *Source = OVE->getSourceExpr())
       return Source->isNullPointerConstant(Ctx, NPC);
@@ -3851,6 +4082,112 @@ bool Expr::refersToGlobalRegisterVar() const {
         return true;
 
   return false;
+}
+
+bool Expr::isSameComparisonOperand(const Expr* E1, const Expr* E2) {
+  E1 = E1->IgnoreParens();
+  E2 = E2->IgnoreParens();
+
+  if (E1->getStmtClass() != E2->getStmtClass())
+    return false;
+
+  switch (E1->getStmtClass()) {
+    default:
+      return false;
+    case CXXThisExprClass:
+      return true;
+    case DeclRefExprClass: {
+      // DeclRefExpr without an ImplicitCastExpr can happen for integral
+      // template parameters.
+      const auto *DRE1 = cast<DeclRefExpr>(E1);
+      const auto *DRE2 = cast<DeclRefExpr>(E2);
+      return DRE1->isRValue() && DRE2->isRValue() &&
+             DRE1->getDecl() == DRE2->getDecl();
+    }
+    case ImplicitCastExprClass: {
+      // Peel off implicit casts.
+      while (true) {
+        const auto *ICE1 = dyn_cast<ImplicitCastExpr>(E1);
+        const auto *ICE2 = dyn_cast<ImplicitCastExpr>(E2);
+        if (!ICE1 || !ICE2)
+          return false;
+        if (ICE1->getCastKind() != ICE2->getCastKind())
+          return false;
+        E1 = ICE1->getSubExpr()->IgnoreParens();
+        E2 = ICE2->getSubExpr()->IgnoreParens();
+        // The final cast must be one of these types.
+        if (ICE1->getCastKind() == CK_LValueToRValue ||
+            ICE1->getCastKind() == CK_ArrayToPointerDecay ||
+            ICE1->getCastKind() == CK_FunctionToPointerDecay) {
+          break;
+        }
+      }
+
+      const auto *DRE1 = dyn_cast<DeclRefExpr>(E1);
+      const auto *DRE2 = dyn_cast<DeclRefExpr>(E2);
+      if (DRE1 && DRE2)
+        return declaresSameEntity(DRE1->getDecl(), DRE2->getDecl());
+
+      const auto *Ivar1 = dyn_cast<ObjCIvarRefExpr>(E1);
+      const auto *Ivar2 = dyn_cast<ObjCIvarRefExpr>(E2);
+      if (Ivar1 && Ivar2) {
+        return Ivar1->isFreeIvar() && Ivar2->isFreeIvar() &&
+               declaresSameEntity(Ivar1->getDecl(), Ivar2->getDecl());
+      }
+
+      const auto *Array1 = dyn_cast<ArraySubscriptExpr>(E1);
+      const auto *Array2 = dyn_cast<ArraySubscriptExpr>(E2);
+      if (Array1 && Array2) {
+        if (!isSameComparisonOperand(Array1->getBase(), Array2->getBase()))
+          return false;
+
+        auto Idx1 = Array1->getIdx();
+        auto Idx2 = Array2->getIdx();
+        const auto Integer1 = dyn_cast<IntegerLiteral>(Idx1);
+        const auto Integer2 = dyn_cast<IntegerLiteral>(Idx2);
+        if (Integer1 && Integer2) {
+          if (!llvm::APInt::isSameValue(Integer1->getValue(),
+                                        Integer2->getValue()))
+            return false;
+        } else {
+          if (!isSameComparisonOperand(Idx1, Idx2))
+            return false;
+        }
+
+        return true;
+      }
+
+      // Walk the MemberExpr chain.
+      while (isa<MemberExpr>(E1) && isa<MemberExpr>(E2)) {
+        const auto *ME1 = cast<MemberExpr>(E1);
+        const auto *ME2 = cast<MemberExpr>(E2);
+        if (!declaresSameEntity(ME1->getMemberDecl(), ME2->getMemberDecl()))
+          return false;
+        if (const auto *D = dyn_cast<VarDecl>(ME1->getMemberDecl()))
+          if (D->isStaticDataMember())
+            return true;
+        E1 = ME1->getBase()->IgnoreParenImpCasts();
+        E2 = ME2->getBase()->IgnoreParenImpCasts();
+      }
+
+      if (isa<CXXThisExpr>(E1) && isa<CXXThisExpr>(E2))
+        return true;
+
+      // A static member variable can end the MemberExpr chain with either
+      // a MemberExpr or a DeclRefExpr.
+      auto getAnyDecl = [](const Expr *E) -> const ValueDecl * {
+        if (const auto *DRE = dyn_cast<DeclRefExpr>(E))
+          return DRE->getDecl();
+        if (const auto *ME = dyn_cast<MemberExpr>(E))
+          return ME->getMemberDecl();
+        return nullptr;
+      };
+
+      const ValueDecl *VD1 = getAnyDecl(E1);
+      const ValueDecl *VD2 = getAnyDecl(E2);
+      return declaresSameEntity(VD1, VD2);
+    }
+  }
 }
 
 /// isArrow - Return true if the base expression is a pointer to vector,
@@ -4284,7 +4621,7 @@ const OpaqueValueExpr *OpaqueValueExpr::findInCopyConstruct(const Expr *e) {
   if (const ExprWithCleanups *ewc = dyn_cast<ExprWithCleanups>(e))
     e = ewc->getSubExpr();
   if (const MaterializeTemporaryExpr *m = dyn_cast<MaterializeTemporaryExpr>(e))
-    e = m->GetTemporaryExpr();
+    e = m->getSubExpr();
   e = cast<CXXConstructExpr>(e)->getArg(0);
   while (const ImplicitCastExpr *ice = dyn_cast<ImplicitCastExpr>(e))
     e = ice->getSubExpr();
@@ -4422,6 +4759,8 @@ unsigned AtomicExpr::getNumSubExprs(AtomicOp Op) {
   case AO__c11_atomic_fetch_and:
   case AO__c11_atomic_fetch_or:
   case AO__c11_atomic_fetch_xor:
+  case AO__c11_atomic_fetch_max:
+  case AO__c11_atomic_fetch_min:
   case AO__atomic_fetch_add:
   case AO__atomic_fetch_sub:
   case AO__atomic_fetch_and:
@@ -4434,6 +4773,8 @@ unsigned AtomicExpr::getNumSubExprs(AtomicOp Op) {
   case AO__atomic_or_fetch:
   case AO__atomic_xor_fetch:
   case AO__atomic_nand_fetch:
+  case AO__atomic_min_fetch:
+  case AO__atomic_max_fetch:
   case AO__atomic_fetch_min:
   case AO__atomic_fetch_max:
     return 3;

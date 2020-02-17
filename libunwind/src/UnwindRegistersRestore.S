@@ -126,7 +126,7 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind16Registers_x86_646jumptoEv)
   movq  56(%rdi), %rsp  # cut back rsp to new location
   pop    %rdi      # rdi was saved here earlier
   ret            # rip was saved here
-#elif defined(__CHERI_PURE_CAPABILITY__)
+#elif defined(__mips64) && defined(__CHERI_PURE_CAPABILITY__)
 .set noreorder
 
 DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind20Registers_mips_cheri6jumptoEv)
@@ -210,6 +210,7 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind20Registers_mips_cheri6jumptoEv)
   RESTORE_CAP(25)
   RESTORE_CAP(26)
   // Also restore 27-31 even though they should be null
+  .set cheri_sysregs_accessible
   RESTORE_CAP(27)
   RESTORE_CAP(28)
   RESTORE_CAP(29)
@@ -671,7 +672,8 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_arm646jumptoEv)
   ldp    x10,x11, [x0, #0x050]
   ldp    x12,x13, [x0, #0x060]
   ldp    x14,x15, [x0, #0x070]
-  ldp    x16,x17, [x0, #0x080]
+  // x16 and x17 were clobbered by the call into the unwinder, so no point in
+  // restoring them.
   ldp    x18,x19, [x0, #0x090]
   ldp    x20,x21, [x0, #0x0A0]
   ldp    x22,x23, [x0, #0x0B0]
@@ -679,8 +681,6 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_arm646jumptoEv)
   ldp    x26,x27, [x0, #0x0D0]
   ldp    x28,x29, [x0, #0x0E0]
   ldr    x30,     [x0, #0x100]  // restore pc into lr
-  ldr    x1,      [x0, #0x0F8]
-  mov    sp,x1                  // restore sp
 
   ldp    d0, d1,  [x0, #0x110]
   ldp    d2, d3,  [x0, #0x120]
@@ -700,7 +700,13 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_arm646jumptoEv)
   ldr    d30,     [x0, #0x200]
   ldr    d31,     [x0, #0x208]
 
+  // Finally, restore sp. This must be done after the the last read from the
+  // context struct, because it is allocated on the stack, and an exception
+  // could clobber the de-allocated portion of the stack after sp has been
+  // restored.
+  ldr    x16,     [x0, #0x0F8]
   ldp    x0, x1,  [x0, #0x000]  // restore x0,x1
+  mov    sp,x16                 // restore sp
   ret    x30                    // jump to pc
 
 #elif defined(__arm__) && !defined(__APPLE__)
@@ -1119,6 +1125,111 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_sparc6jumptoEv)
   ld  [%o0 + 60],  %o7
   jmp %o7
    nop
+
+#elif defined(__riscv) && __riscv_xlen == 64
+
+//
+// void libunwind::Registers_riscv::jumpto()
+//
+// On entry:
+//  thread_state pointer is in a0
+//
+  .p2align 2
+DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_riscv6jumptoEv)
+#if defined(__riscv_flen) && __riscv_flen == 64
+.macro restore_fpr num
+#ifdef __CHERI_PURE_CAPABILITY__
+  cfld    f\num, (__SIZEOF_CHERI_CAPABILITY__ * 32 + 8 * \num)(ca0)
+#else
+  fld    f\num, (8 * 32 + 8 * \num)(a0)
+#endif
+.endm
+
+.macro restore_gpr num
+#ifdef __CHERI_PURE_CAPABILITY__
+  clc   c\num, (__SIZEOF_CHERI_CAPABILITY__ * \num)(ca0)
+#else
+  ld    x\num, (8 * \num)(a0)
+#endif
+.endm
+
+   restore_fpr 0
+   restore_fpr 1
+   restore_fpr 2
+   restore_fpr 3
+   restore_fpr 4
+   restore_fpr 5
+   restore_fpr 6
+   restore_fpr 7
+   restore_fpr 8
+   restore_fpr 9
+   restore_fpr 10
+   restore_fpr 11
+   restore_fpr 12
+   restore_fpr 13
+   restore_fpr 14
+   restore_fpr 15
+   restore_fpr 16
+   restore_fpr 17
+   restore_fpr 18
+   restore_fpr 19
+   restore_fpr 20
+   restore_fpr 21
+   restore_fpr 22
+   restore_fpr 23
+   restore_fpr 24
+   restore_fpr 25
+   restore_fpr 26
+   restore_fpr 27
+   restore_fpr 28
+   restore_fpr 29
+   restore_fpr 30
+   restore_fpr 31
+#endif
+
+#ifdef __CHERI_PURE_CAPABILITY__
+#pragma message("TODO: restore $ddc")
+#endif
+  // x0 is zero
+  restore_gpr 1
+  restore_gpr 2
+  restore_gpr 3
+  restore_gpr 4
+  restore_gpr 5
+  restore_gpr 6
+  restore_gpr 7
+  restore_gpr 8
+  restore_gpr 9
+  // skip a0 for now
+  restore_gpr 11
+  restore_gpr 12
+  restore_gpr 13
+  restore_gpr 14
+  restore_gpr 15
+  restore_gpr 16
+  restore_gpr 17
+  restore_gpr 18
+  restore_gpr 19
+  restore_gpr 20
+  restore_gpr 21
+  restore_gpr 22
+  restore_gpr 23
+  restore_gpr 24
+  restore_gpr 25
+  restore_gpr 26
+  restore_gpr 27
+  restore_gpr 28
+  restore_gpr 29
+  restore_gpr 30
+  restore_gpr 31
+  restore_gpr 10   // restore a0
+
+#ifdef __CHERI_PURE_CAPABILITY__
+  ret           // jump to ra
+#else
+  cret          // jump to cra
+#endif
+END_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_riscv6jumptoEv)
 
 #endif
 

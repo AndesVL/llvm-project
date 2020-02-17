@@ -11,6 +11,8 @@
 #define LLVM_LIB_TARGET_AMDGPU_AMDGPU_H
 
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/IR/IntrinsicsR600.h" // TODO: Sink this.
+#include "llvm/IR/IntrinsicsAMDGPU.h" // TODO: Sink this.
 
 namespace llvm {
 
@@ -53,10 +55,13 @@ FunctionPass *createSIMemoryLegalizerPass();
 FunctionPass *createSIInsertWaitcntsPass();
 FunctionPass *createSIPreAllocateWWMRegsPass();
 FunctionPass *createSIFormMemoryClausesPass();
-FunctionPass *createAMDGPUSimplifyLibCallsPass(const TargetOptions &);
+FunctionPass *createAMDGPUSimplifyLibCallsPass(const TargetOptions &,
+                                               const TargetMachine *);
 FunctionPass *createAMDGPUUseNativeCallsPass();
 FunctionPass *createAMDGPUCodeGenPreparePass();
 FunctionPass *createAMDGPUMachineCFGStructurizerPass();
+FunctionPass *createAMDGPUPropagateAttributesEarlyPass(const TargetMachine *);
+ModulePass *createAMDGPUPropagateAttributesLatePass(const TargetMachine *);
 FunctionPass *createAMDGPURewriteOutArgumentsPass();
 FunctionPass *createSIModeRegisterPass();
 
@@ -90,6 +95,12 @@ extern char &AMDGPULowerKernelArgumentsID;
 ModulePass *createAMDGPULowerKernelAttributesPass();
 void initializeAMDGPULowerKernelAttributesPass(PassRegistry &);
 extern char &AMDGPULowerKernelAttributesID;
+
+void initializeAMDGPUPropagateAttributesEarlyPass(PassRegistry &);
+extern char &AMDGPUPropagateAttributesEarlyID;
+
+void initializeAMDGPUPropagateAttributesLatePass(PassRegistry &);
+extern char &AMDGPUPropagateAttributesLateID;
 
 void initializeAMDGPURewriteOutArgumentsPass(PassRegistry &);
 extern char &AMDGPURewriteOutArgumentsID;
@@ -133,6 +144,9 @@ extern char &SIFixupVectorISelID;
 void initializeSILowerI1CopiesPass(PassRegistry &);
 extern char &SILowerI1CopiesID;
 
+void initializeSILowerSGPRSpillsPass(PassRegistry &);
+extern char &SILowerSGPRSpillsID;
+
 void initializeSILoadStoreOptimizerPass(PassRegistry &);
 extern char &SILoadStoreOptimizerID;
 
@@ -141,6 +155,9 @@ extern char &SIWholeQuadModeID;
 
 void initializeSILowerControlFlowPass(PassRegistry &);
 extern char &SILowerControlFlowID;
+
+void initializeSIRemoveShortExecBranchesPass(PassRegistry &);
+extern char &SIRemoveShortExecBranchesID;
 
 void initializeSIInsertSkipsPass(PassRegistry &);
 extern char &SIInsertSkipsPassID;
@@ -175,6 +192,10 @@ FunctionPass *createAMDGPUISelDag(
 ModulePass *createAMDGPUAlwaysInlinePass(bool GlobalOpt = true);
 ModulePass *createR600OpenCLImageTypeLoweringPass();
 FunctionPass *createAMDGPUAnnotateUniformValues();
+
+ModulePass *createAMDGPUPrintfRuntimeBinding();
+void initializeAMDGPUPrintfRuntimeBindingPass(PassRegistry&);
+extern char &AMDGPUPrintfRuntimeBindingID;
 
 ModulePass* createAMDGPUUnifyMetadataPass();
 void initializeAMDGPUUnifyMetadataPass(PassRegistry&);

@@ -98,19 +98,6 @@ void addCygMingDefines(const LangOptions &Opts, MacroBuilder &Builder) {
   }
 }
 
-void addMinGWDefines(const llvm::Triple &Triple, const LangOptions &Opts,
-                     MacroBuilder &Builder) {
-  DefineStd(Builder, "WIN32", Opts);
-  DefineStd(Builder, "WINNT", Opts);
-  if (Triple.isArch64Bit()) {
-    DefineStd(Builder, "WIN64", Opts);
-    Builder.defineMacro("__MINGW64__");
-  }
-  Builder.defineMacro("__MSVCRT__");
-  Builder.defineMacro("__MINGW32__");
-  addCygMingDefines(Opts, Builder);
-}
-
 //===----------------------------------------------------------------------===//
 // Driver code
 //===----------------------------------------------------------------------===//
@@ -135,6 +122,11 @@ TargetInfo *AllocateTarget(const llvm::Triple &Triple,
   case llvm::Triple::lanai:
     return new LanaiTargetInfo(Triple, Opts);
 
+  case llvm::Triple::aarch64_32:
+    if (Triple.isOSDarwin())
+      return new DarwinAArch64TargetInfo(Triple, Opts);
+
+    return nullptr;
   case llvm::Triple::aarch64:
     if (Triple.isOSDarwin())
       return new DarwinAArch64TargetInfo(Triple, Opts);
@@ -377,15 +369,32 @@ TargetInfo *AllocateTarget(const llvm::Triple &Triple,
     return new AMDGPUTargetInfo(Triple, Opts);
 
   case llvm::Triple::riscv32:
-    // TODO: add cases for FreeBSD, NetBSD, RTEMS once tested.
-    if (os == llvm::Triple::Linux)
+    // TODO: add cases for NetBSD once tested.
+    switch (os) {
+    case llvm::Triple::FreeBSD:
+      return new FreeBSDTargetInfo<RISCV32TargetInfo>(Triple, Opts);
+    case llvm::Triple::Linux:
       return new LinuxTargetInfo<RISCV32TargetInfo>(Triple, Opts);
-    return new RISCV32TargetInfo(Triple, Opts);
+    case llvm::Triple::RTEMS:
+      return new RTEMSTargetInfo<RISCV32TargetInfo>(Triple, Opts);
+    default:
+      return new RISCV32TargetInfo(Triple, Opts);
+    }
+
   case llvm::Triple::riscv64:
-    // TODO: add cases for FreeBSD, NetBSD, RTEMS once tested.
-    if (os == llvm::Triple::Linux)
+    // TODO: add cases for NetBSD once tested.
+    switch (os) {
+    case llvm::Triple::FreeBSD:
+      return new FreeBSDTargetInfo<RISCV64TargetInfo>(Triple, Opts);
+    case llvm::Triple::Fuchsia:
+      return new FuchsiaTargetInfo<RISCV64TargetInfo>(Triple, Opts);
+    case llvm::Triple::Linux:
       return new LinuxTargetInfo<RISCV64TargetInfo>(Triple, Opts);
-    return new RISCV64TargetInfo(Triple, Opts);
+    case llvm::Triple::RTEMS:
+      return new RTEMSTargetInfo<RISCV64TargetInfo>(Triple, Opts);
+    default:
+      return new RISCV64TargetInfo(Triple, Opts);
+    }
 
   case llvm::Triple::sparc:
     switch (os) {
@@ -616,6 +625,11 @@ TargetInfo *
 TargetInfo::CreateTargetInfo(DiagnosticsEngine &Diags,
                              const std::shared_ptr<TargetOptions> &Opts) {
   llvm::Triple Triple(Opts->Triple);
+
+  // FIXME: this is probably not the right place to add this
+  if (Triple.isMIPS() && Opts->ABI == "purecap") {
+    Triple.setEnvironment(llvm::Triple::CheriPurecap);
+  }
 
   // Construct the target
   std::unique_ptr<TargetInfo> Target(AllocateTarget(Triple, *Opts));

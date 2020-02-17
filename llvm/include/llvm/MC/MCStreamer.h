@@ -46,6 +46,7 @@ struct MCDwarfFrameInfo;
 class MCExpr;
 class MCInst;
 class MCInstPrinter;
+class MCRegister;
 class MCSection;
 class MCStreamer;
 class MCSymbolRefExpr;
@@ -53,9 +54,16 @@ class MCSubtargetInfo;
 class raw_ostream;
 class Twine;
 
+namespace codeview {
+struct DefRangeRegisterRelHeader;
+struct DefRangeSubfieldRegisterHeader;
+struct DefRangeRegisterHeader;
+struct DefRangeFramePointerRelHeader;
+}
+
 using MCSectionSubPair = std::pair<MCSection *, const MCExpr *>;
 
-enum class TailPaddingAmount : unsigned { None = 0u };
+enum class TailPaddingAmount : uint64_t { None = 0u };
 
 /// Target specific streamer interface. This is used so that targets can
 /// implement support for target specific assembly directives.
@@ -97,8 +105,9 @@ public:
   // Allow a target to add behavior to the emitAssignment of MCStreamer.
   virtual void emitAssignment(MCSymbol *Symbol, const MCExpr *Value);
 
-  virtual void prettyPrintAsm(MCInstPrinter &InstPrinter, raw_ostream &OS,
-                              const MCInst &Inst, const MCSubtargetInfo &STI);
+  virtual void prettyPrintAsm(MCInstPrinter &InstPrinter, uint64_t Address,
+                              const MCInst &Inst, const MCSubtargetInfo &STI,
+                              raw_ostream &OS);
 
   virtual void emitDwarfFileDirective(StringRef Directive);
 
@@ -120,17 +129,6 @@ public:
 
   /// Whether to use the __cap_relocs hack (if the target supports capabilities)
   virtual bool useLegacyCapRelocs() const;
-
-  /// CHERI128 uses compressed capabilities. If we would like to guarantee
-  /// non-overlapping bounds for all global symbols we must over-align the
-  /// symbol if the size is no precisely representable. We also add padding at
-  /// the end to ensure that we cannot access another variable that happens to
-  /// be located in the bytes that are accessible after the end of the object
-  /// due to the bounds having been rounded up.
-  virtual TailPaddingAmount getTailPaddingForPreciseBounds(unsigned Size) {
-    return TailPaddingAmount::None;
-  };
-  virtual unsigned getAlignmentForPreciseBounds(unsigned Size) { return 0; };
 };
 
 // FIXME: declared here because it is used from
@@ -234,6 +232,13 @@ class MCStreamer {
 
   bool UseAssemblerInfoForParsing;
 
+  /// Is the assembler allowed to insert padding automatically?  For
+  /// correctness reasons, we sometimes need to ensure instructions aren't
+  /// seperated in unexpected ways.  At the moment, this feature is only
+  /// useable from an integrated assembler, but assembly syntax is under
+  /// discussion for future inclusion.
+  bool AllowAutoPadding = false;
+
 protected:
   MCStreamer(MCContext &Ctx);
 
@@ -277,6 +282,9 @@ public:
   MCTargetStreamer *getTargetStreamer() {
     return TargetStreamer.get();
   }
+
+  void setAllowAutoPadding(bool v) { AllowAutoPadding = v; }
+  bool getAllowAutoPadding() const { return AllowAutoPadding; }
 
   /// When emitting an object file, create and emit a real label. When emitting
   /// textual assembly, this should do nothing to avoid polluting our output.
@@ -556,6 +564,17 @@ public:
   /// \param Symbol - Symbol the image relative relocation should point to.
   virtual void EmitCOFFImgRel32(MCSymbol const *Symbol, int64_t Offset);
 
+  /// Emits an lcomm directive with XCOFF csect information.
+  ///
+  /// \param LabelSym - Label on the block of storage.
+  /// \param Size - The size of the block of storage.
+  /// \param CsectSym - Csect name for the block of storage.
+  /// \param ByteAlignment - The alignment of the symbol in bytes. Must be a
+  /// power of 2.
+  virtual void EmitXCOFFLocalCommonSymbol(MCSymbol *LabelSym, uint64_t Size,
+                                          MCSymbol *CsectSym,
+                                          unsigned ByteAlignment);
+
   /// Emit an ELF .size directive.
   ///
   /// This corresponds to an assembler statement such as:
@@ -650,6 +669,13 @@ public:
   /// to pass in a MCExpr for constant integers.
   virtual void EmitIntValue(uint64_t Value, unsigned Size);
 
+  /// Special case of EmitValue that avoids the client having to pass
+  /// in a MCExpr for constant integers & prints in Hex format for certain
+  /// modes.
+  virtual void EmitIntValueInHex(uint64_t Value, unsigned Size) {
+    EmitIntValue(Value, Size);
+  }
+
   virtual void EmitULEB128Value(const MCExpr *Value);
 
   virtual void EmitSLEB128Value(const MCExpr *Value);
@@ -714,6 +740,11 @@ public:
 
   // Emit the expression \p Value into the output as a CHERI capability
   void EmitCheriCapability(const MCSymbol *Value, int64_t Addend,
+                           unsigned CapSize, SMLoc Loc = SMLoc()) {
+    EmitCheriCapability(Value, MCConstantExpr::create(Addend, Context), CapSize,
+                        Loc);
+  }
+  void EmitCheriCapability(const MCSymbol *Value, const MCExpr *Addend,
                            unsigned CapSize, SMLoc Loc = SMLoc());
 
   // Emit \p Value as an untagged capability-size value
@@ -888,6 +919,22 @@ public:
       ArrayRef<std::pair<const MCSymbol *, const MCSymbol *>> Ranges,
       StringRef FixedSizePortion);
 
+  virtual void EmitCVDefRangeDirective(
+      ArrayRef<std::pair<const MCSymbol *, const MCSymbol *>> Ranges,
+      codeview::DefRangeRegisterRelHeader DRHdr);
+
+  virtual void EmitCVDefRangeDirective(
+      ArrayRef<std::pair<const MCSymbol *, const MCSymbol *>> Ranges,
+      codeview::DefRangeSubfieldRegisterHeader DRHdr);
+
+  virtual void EmitCVDefRangeDirective(
+      ArrayRef<std::pair<const MCSymbol *, const MCSymbol *>> Ranges,
+      codeview::DefRangeRegisterHeader DRHdr);
+
+  virtual void EmitCVDefRangeDirective(
+      ArrayRef<std::pair<const MCSymbol *, const MCSymbol *>> Ranges,
+      codeview::DefRangeFramePointerRelHeader DRHdr);
+
   /// This implements the CodeView '.cv_stringtable' assembler directive.
   virtual void EmitCVStringTableDirective() {}
 
@@ -945,13 +992,13 @@ public:
   virtual void EmitWinCFIFuncletOrFuncEnd(SMLoc Loc = SMLoc());
   virtual void EmitWinCFIStartChained(SMLoc Loc = SMLoc());
   virtual void EmitWinCFIEndChained(SMLoc Loc = SMLoc());
-  virtual void EmitWinCFIPushReg(unsigned Register, SMLoc Loc = SMLoc());
-  virtual void EmitWinCFISetFrame(unsigned Register, unsigned Offset,
+  virtual void EmitWinCFIPushReg(MCRegister Register, SMLoc Loc = SMLoc());
+  virtual void EmitWinCFISetFrame(MCRegister Register, unsigned Offset,
                                   SMLoc Loc = SMLoc());
   virtual void EmitWinCFIAllocStack(unsigned Size, SMLoc Loc = SMLoc());
-  virtual void EmitWinCFISaveReg(unsigned Register, unsigned Offset,
+  virtual void EmitWinCFISaveReg(MCRegister Register, unsigned Offset,
                                  SMLoc Loc = SMLoc());
-  virtual void EmitWinCFISaveXMM(unsigned Register, unsigned Offset,
+  virtual void EmitWinCFISaveXMM(MCRegister Register, unsigned Offset,
                                  SMLoc Loc = SMLoc());
   virtual void EmitWinCFIPushFrame(bool Code, SMLoc Loc = SMLoc());
   virtual void EmitWinCFIEndProlog(SMLoc Loc = SMLoc());
@@ -1014,8 +1061,9 @@ public:
   virtual bool mayHaveInstructions(MCSection &Sec) const { return true; }
 
 protected:
-  virtual void EmitCheriCapabilityImpl(const MCSymbol *Value, int64_t Addend,
-                                       unsigned CapSize, SMLoc Loc = SMLoc());
+  virtual void EmitCheriCapabilityImpl(const MCSymbol *Value,
+                                       const MCExpr *Addend, unsigned CapSize,
+                                       SMLoc Loc = SMLoc());
 
   // Emit a CHERI capability using the legacy __cap_relocs hack
   virtual void EmitLegacyCHERICapability(const MCExpr *Value, unsigned CapSize,

@@ -1,6 +1,6 @@
-; RUN: llc < %s -verify-machineinstrs -mtriple=x86_64-apple-darwin | FileCheck --check-prefix=CHECK-APPLE %s
-; RUN: llc < %s -verify-machineinstrs -mtriple=x86_64-apple-darwin -O0 | FileCheck --check-prefix=CHECK-O0 %s
-; RUN: llc < %s -verify-machineinstrs -mtriple=i386-apple-darwin | FileCheck --check-prefix=CHECK-i386 %s
+; RUN: llc -verify-machineinstrs < %s -mtriple=x86_64-apple-darwin -disable-block-placement | FileCheck --check-prefix=CHECK-APPLE %s
+; RUN: llc -verify-machineinstrs -O0 < %s -mtriple=x86_64-apple-darwin -disable-block-placement | FileCheck --check-prefix=CHECK-O0 %s
+; RUN: llc -verify-machineinstrs < %s -mtriple=i386-apple-darwin -disable-block-placement | FileCheck --check-prefix=CHECK-i386 %s
 
 declare i8* @malloc(i64)
 declare void @free(i8*)
@@ -533,7 +533,7 @@ define swiftcc void @swifterror_reg_clobber(%swift_error** nocapture %err) {
 }
 
 ; CHECK-APPLE-LABEL: params_in_reg
-; Save callee save registers to store clobbered arugments.
+; Save callee save registers to store clobbered arguments.
 ; CHECK-APPLE:  pushq   %rbp
 ; CHECK-APPLE:  pushq   %r15
 ; CHECK-APPLE:  pushq   %r14

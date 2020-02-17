@@ -141,14 +141,14 @@ private:
   /// Helper function to split a wide generic register into bitwise blocks with
   /// the given Type (which implies the number of blocks needed). The generic
   /// registers created are appended to Ops, starting at bit 0 of Reg.
-  void extractParts(unsigned Reg, LLT Ty, int NumParts,
-                    SmallVectorImpl<unsigned> &VRegs);
+  void extractParts(Register Reg, LLT Ty, int NumParts,
+                    SmallVectorImpl<Register> &VRegs);
 
   /// Version which handles irregular splits.
-  bool extractParts(unsigned Reg, LLT RegTy, LLT MainTy,
+  bool extractParts(Register Reg, LLT RegTy, LLT MainTy,
                     LLT &LeftoverTy,
-                    SmallVectorImpl<unsigned> &VRegs,
-                    SmallVectorImpl<unsigned> &LeftoverVRegs);
+                    SmallVectorImpl<Register> &VRegs,
+                    SmallVectorImpl<Register> &LeftoverVRegs);
 
   /// Helper function to build a wide generic register \p DstReg of type \p
   /// RegTy from smaller parts. This will produce a G_MERGE_VALUES,
@@ -159,17 +159,38 @@ private:
   ///
   /// If \p ResultTy does not evenly break into \p PartTy sized pieces, the
   /// remainder must be specified with \p LeftoverRegs of type \p LeftoverTy.
-  void insertParts(unsigned DstReg, LLT ResultTy,
-                   LLT PartTy, ArrayRef<unsigned> PartRegs,
-                   LLT LeftoverTy = LLT(), ArrayRef<unsigned> LeftoverRegs = {});
+  void insertParts(Register DstReg, LLT ResultTy,
+                   LLT PartTy, ArrayRef<Register> PartRegs,
+                   LLT LeftoverTy = LLT(), ArrayRef<Register> LeftoverRegs = {});
+
+  /// Unmerge \p SrcReg into \p Parts with the greatest common divisor type with
+  /// \p DstTy and \p NarrowTy. Returns the GCD type.
+  LLT extractGCDType(SmallVectorImpl<Register> &Parts, LLT DstTy,
+                     LLT NarrowTy, Register SrcReg);
+
+  /// Produce a merge of values in \p VRegs to define \p DstReg. Perform a merge
+  /// from the least common multiple type, and convert as appropriate to \p
+  /// DstReg.
+  ///
+  /// \p VRegs should each have type \p GCDTy. This type should be greatest
+  /// common divisor type of \p DstReg, \p NarrowTy, and an undetermined source
+  /// type.
+  ///
+  /// \p NarrowTy is the desired result merge source type. If the source value
+  /// needs to be widened to evenly cover \p DstReg, inserts high bits
+  /// corresponding to the extension opcode \p PadStrategy.
+  void buildLCMMerge(Register DstReg, LLT NarrowTy, LLT GCDTy,
+                     SmallVectorImpl<Register> &VRegs,
+                     unsigned PadStrategy = TargetOpcode::G_ANYEXT);
 
   /// Perform generic multiplication of values held in multiple registers.
   /// Generated instructions use only types NarrowTy and i1.
   /// Destination can be same or two times size of the source.
-  void multiplyRegisters(SmallVectorImpl<unsigned> &DstRegs,
-                         ArrayRef<unsigned> Src1Regs,
-                         ArrayRef<unsigned> Src2Regs, LLT NarrowTy);
+  void multiplyRegisters(SmallVectorImpl<Register> &DstRegs,
+                         ArrayRef<Register> Src1Regs,
+                         ArrayRef<Register> Src2Regs, LLT NarrowTy);
 
+public:
   LegalizeResult fewerElementsVectorImplicitDef(MachineInstr &MI,
                                                 unsigned TypeIdx, LLT NarrowTy);
 
@@ -199,6 +220,13 @@ private:
   LegalizeResult moreElementsVectorPhi(MachineInstr &MI, unsigned TypeIdx,
                                        LLT MoreTy);
 
+  LegalizeResult fewerElementsVectorUnmergeValues(MachineInstr &MI,
+                                                  unsigned TypeIdx,
+                                                  LLT NarrowTy);
+  LegalizeResult fewerElementsVectorBuildVector(MachineInstr &MI,
+                                                unsigned TypeIdx,
+                                                LLT NarrowTy);
+
   LegalizeResult
   reduceLoadStoreWidth(MachineInstr &MI, unsigned TypeIdx, LLT NarrowTy);
 
@@ -211,14 +239,32 @@ private:
   LegalizeResult narrowScalarInsert(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
 
   LegalizeResult narrowScalarBasic(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
+  LegalizeResult narrowScalarExt(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
   LegalizeResult narrowScalarSelect(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
 
+  LegalizeResult lowerBitcast(MachineInstr &MI);
   LegalizeResult lowerBitCount(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
 
   LegalizeResult lowerU64ToF32BitOps(MachineInstr &MI);
   LegalizeResult lowerUITOFP(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
   LegalizeResult lowerSITOFP(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
+  LegalizeResult lowerFPTOUI(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
+  LegalizeResult lowerMinMax(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
+  LegalizeResult lowerFCopySign(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
+  LegalizeResult lowerFMinNumMaxNum(MachineInstr &MI);
+  LegalizeResult lowerFMad(MachineInstr &MI);
+  LegalizeResult lowerIntrinsicRound(MachineInstr &MI);
+  LegalizeResult lowerUnmergeValues(MachineInstr &MI);
+  LegalizeResult lowerShuffleVector(MachineInstr &MI);
+  LegalizeResult lowerDynStackAlloc(MachineInstr &MI);
+  LegalizeResult lowerExtract(MachineInstr &MI);
+  LegalizeResult lowerInsert(MachineInstr &MI);
+  LegalizeResult lowerSADDO_SSUBO(MachineInstr &MI);
+  LegalizeResult lowerBswap(MachineInstr &MI);
+  LegalizeResult lowerBitreverse(MachineInstr &MI);
+  LegalizeResult lowerReadRegister(MachineInstr &MI);
 
+private:
   MachineRegisterInfo &MRI;
   const LegalizerInfo &LI;
   /// To keep track of changes made by the LegalizerHelper.
@@ -230,6 +276,11 @@ LegalizerHelper::LegalizeResult
 createLibcall(MachineIRBuilder &MIRBuilder, RTLIB::Libcall Libcall,
               const CallLowering::ArgInfo &Result,
               ArrayRef<CallLowering::ArgInfo> Args);
+
+/// Create a libcall to memcpy et al.
+LegalizerHelper::LegalizeResult createMemLibcall(MachineIRBuilder &MIRBuilder,
+                                                 MachineRegisterInfo &MRI,
+                                                 MachineInstr &MI);
 
 } // End namespace llvm.
 

@@ -19,13 +19,14 @@
 #include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Utility/Stream.h"
 
-#include "DWARFUnit.h"
+#include "DWARFCompileUnit.h"
 #include "DWARFDebugAbbrev.h"
 #include "DWARFDebugAranges.h"
 #include "DWARFDebugInfo.h"
 #include "DWARFDebugRanges.h"
 #include "DWARFDeclContext.h"
 #include "DWARFFormValue.h"
+#include "DWARFUnit.h"
 #include "SymbolFileDWARF.h"
 #include "SymbolFileDWARFDwo.h"
 
@@ -50,9 +51,9 @@ bool DWARFDebugInfoEntry::Extract(const DWARFDataExtractor &data,
 
   if (m_abbr_idx) {
     lldb::offset_t offset = *offset_ptr;
-    auto *abbrevDecl = GetAbbreviationDeclarationPtr(cu);
+    const auto *abbrevDecl = GetAbbreviationDeclarationPtr(cu);
     if (abbrevDecl == nullptr) {
-      cu->GetSymbolFileDWARF()->GetObjectFile()->GetModule()->ReportError(
+      cu->GetSymbolFileDWARF().GetObjectFile()->GetModule()->ReportError(
           "{0x%8.8x}: invalid abbreviation code %u, please file a bug and "
           "attach the file at the start of this error message",
           m_offset, (unsigned)abbr_idx);
@@ -155,6 +156,7 @@ bool DWARFDebugInfoEntry::Extract(const DWARFDataExtractor &data,
 
           // signed or unsigned LEB 128 values
           case DW_FORM_addrx:
+          case DW_FORM_loclistx:
           case DW_FORM_rnglistx:
           case DW_FORM_sdata:
           case DW_FORM_udata:
@@ -191,7 +193,7 @@ bool DWARFDebugInfoEntry::Extract(const DWARFDataExtractor &data,
     *offset_ptr = offset;
     return true;
   } else {
-    m_tag = 0;
+    m_tag = llvm::dwarf::DW_TAG_null;
     m_has_children = false;
     return true; // NULL debug tag entry
   }
@@ -199,7 +201,7 @@ bool DWARFDebugInfoEntry::Extract(const DWARFDataExtractor &data,
   return false;
 }
 
-static DWARFRangeList GetRangesOrReportError(const DWARFUnit &unit,
+static DWARFRangeList GetRangesOrReportError(DWARFUnit &unit,
                                              const DWARFDebugInfoEntry &die,
                                              const DWARFFormValue &value) {
   llvm::Expected<DWARFRangeList> expected_ranges =
@@ -208,7 +210,7 @@ static DWARFRangeList GetRangesOrReportError(const DWARFUnit &unit,
           : unit.FindRnglistFromOffset(value.Unsigned());
   if (expected_ranges)
     return std::move(*expected_ranges);
-  unit.GetSymbolFileDWARF()->GetObjectFile()->GetModule()->ReportError(
+  unit.GetSymbolFileDWARF().GetObjectFile()->GetModule()->ReportError(
       "{0x%8.8x}: DIE has DW_AT_ranges(0x%" PRIx64 ") attribute, but "
       "range extraction failed (%s), please file a bug "
       "and attach the file at the start of this error message",
@@ -222,25 +224,19 @@ static DWARFRangeList GetRangesOrReportError(const DWARFUnit &unit,
 // Gets the valid address ranges for a given DIE by looking for a
 // DW_AT_low_pc/DW_AT_high_pc pair, DW_AT_entry_pc, or DW_AT_ranges attributes.
 bool DWARFDebugInfoEntry::GetDIENamesAndRanges(
-    const DWARFUnit *cu, const char *&name, const char *&mangled,
+    DWARFUnit *cu, const char *&name, const char *&mangled,
     DWARFRangeList &ranges, int &decl_file, int &decl_line, int &decl_column,
     int &call_file, int &call_line, int &call_column,
     DWARFExpression *frame_base) const {
-  SymbolFileDWARFDwo *dwo_symbol_file = cu->GetDwoSymbolFile();
-  if (dwo_symbol_file)
-    return GetDIENamesAndRanges(
-        dwo_symbol_file->GetCompileUnit(), name, mangled, ranges, decl_file,
-        decl_line, decl_column, call_file, call_line, call_column, frame_base);
-
   dw_addr_t lo_pc = LLDB_INVALID_ADDRESS;
   dw_addr_t hi_pc = LLDB_INVALID_ADDRESS;
-  std::vector<DIERef> die_refs;
+  std::vector<DWARFDIE> dies;
   bool set_frame_base_loclist_addr = false;
 
-  auto abbrevDecl = GetAbbreviationDeclarationPtr(cu);
+  const auto *abbrevDecl = GetAbbreviationDeclarationPtr(cu);
 
-  SymbolFileDWARF *dwarf2Data = cu->GetSymbolFileDWARF();
-  lldb::ModuleSP module = dwarf2Data->GetObjectFile()->GetModule();
+  SymbolFileDWARF &dwarf = cu->GetSymbolFileDWARF();
+  lldb::ModuleSP module = dwarf.GetObjectFile()->GetModule();
 
   if (abbrevDecl) {
     const DWARFDataExtractor &data = cu->GetData();
@@ -302,11 +298,11 @@ bool DWARFDebugInfoEntry::GetDIENamesAndRanges(
           break;
 
         case DW_AT_abstract_origin:
-          die_refs.emplace_back(form_value);
+          dies.push_back(form_value.Reference());
           break;
 
         case DW_AT_specification:
-          die_refs.emplace_back(form_value);
+          dies.push_back(form_value.Reference());
           break;
 
         case DW_AT_decl_file:
@@ -345,23 +341,18 @@ bool DWARFDebugInfoEntry::GetDIENamesAndRanges(
               uint32_t block_offset =
                   form_value.BlockData() - data.GetDataStart();
               uint32_t block_length = form_value.Unsigned();
-              *frame_base = DWARFExpression(module, data, cu,
-                                            block_offset, block_length);
+              *frame_base = DWARFExpression(
+                  module, DataExtractor(data, block_offset, block_length), cu);
             } else {
-              const DWARFDataExtractor &debug_loc_data =
-                  dwarf2Data->DebugLocData();
-              const dw_offset_t debug_loc_offset = form_value.Unsigned();
-
-              size_t loc_list_length = DWARFExpression::LocationListSize(
-                  cu, debug_loc_data, debug_loc_offset);
-              if (loc_list_length > 0) {
-                *frame_base =
-                    DWARFExpression(module, debug_loc_data, cu,
-                                    debug_loc_offset, loc_list_length);
+              DataExtractor data = cu->GetLocationData();
+              const dw_offset_t offset = form_value.Unsigned();
+              if (data.ValidOffset(offset)) {
+                data = DataExtractor(data, offset, data.GetByteSize() - offset);
+                *frame_base = DWARFExpression(module, data, cu);
                 if (lo_pc != LLDB_INVALID_ADDRESS) {
                   assert(lo_pc >= cu->GetBaseAddress());
-                  frame_base->SetLocationListSlide(lo_pc -
-                                                   cu->GetBaseAddress());
+                  frame_base->SetLocationListAddresses(cu->GetBaseAddress(),
+                                                       lo_pc);
                 } else {
                   set_frame_base_loclist_addr = true;
                 }
@@ -389,17 +380,15 @@ bool DWARFDebugInfoEntry::GetDIENamesAndRanges(
   if (set_frame_base_loclist_addr) {
     dw_addr_t lowest_range_pc = ranges.GetMinRangeBase(0);
     assert(lowest_range_pc >= cu->GetBaseAddress());
-    frame_base->SetLocationListSlide(lowest_range_pc - cu->GetBaseAddress());
+    frame_base->SetLocationListAddresses(cu->GetBaseAddress(), lowest_range_pc);
   }
 
   if (ranges.IsEmpty() || name == nullptr || mangled == nullptr) {
-    for (const DIERef &die_ref : die_refs) {
-      if (die_ref.die_offset != DW_INVALID_OFFSET) {
-        DWARFDIE die = dwarf2Data->GetDIE(die_ref);
-        if (die)
-          die.GetDIE()->GetDIENamesAndRanges(die.GetCU(), name, mangled, ranges,
-                                             decl_file, decl_line, decl_column,
-                                             call_file, call_line, call_column);
+    for (const DWARFDIE &die : dies) {
+      if (die) {
+        die.GetDIE()->GetDIENamesAndRanges(die.GetCU(), name, mangled, ranges,
+                                           decl_file, decl_line, decl_column,
+                                           call_file, call_line, call_column);
       }
     }
   }
@@ -423,7 +412,7 @@ void DWARFDebugInfoEntry::Dump(const DWARFUnit *cu, Stream &s,
     if (abbrCode != m_abbr_idx) {
       s.Printf("error: DWARF has been modified\n");
     } else if (abbrCode) {
-      auto *abbrevDecl = GetAbbreviationDeclarationPtr(cu);
+      const auto *abbrevDecl = GetAbbreviationDeclarationPtr(cu);
       if (abbrevDecl) {
         s.PutCString(DW_TAG_value_to_name(abbrevDecl->Tag()));
         s.Printf(" [%u] %c\n", abbrCode, abbrevDecl->HasChildren() ? '*' : ' ');
@@ -489,8 +478,6 @@ void DWARFDebugInfoEntry::DumpAttribute(
 
   s.PutCString("( ");
 
-  SymbolFileDWARF *dwarf2Data = cu->GetSymbolFileDWARF();
-
   // Check to see if we have any special attribute formatters
   switch (attr) {
   case DW_AT_stmt_list:
@@ -520,10 +507,8 @@ void DWARFDebugInfoEntry::DumpAttribute(
       // We have a location list offset as the value that is the offset into
       // the .debug_loc section that describes the value over it's lifetime
       uint64_t debug_loc_offset = form_value.Unsigned();
-      if (dwarf2Data) {
-        DWARFExpression::PrintDWARFLocationList(
-            s, cu, dwarf2Data->DebugLocData(), debug_loc_offset);
-      }
+      DWARFExpression::PrintDWARFLocationList(s, cu, cu->GetLocationData(),
+                                              debug_loc_offset);
     }
   } break;
 
@@ -556,7 +541,7 @@ void DWARFDebugInfoEntry::DumpAttribute(
 size_t DWARFDebugInfoEntry::GetAttributes(
     const DWARFUnit *cu, DWARFAttributes &attributes,
     uint32_t curr_depth) const {
-  auto abbrevDecl = GetAbbreviationDeclarationPtr(cu);
+  const auto *abbrevDecl = GetAbbreviationDeclarationPtr(cu);
   if (abbrevDecl) {
     const DWARFDataExtractor &data = cu->GetData();
     lldb::offset_t offset = GetFirstAttributeOffset();
@@ -616,16 +601,7 @@ dw_offset_t DWARFDebugInfoEntry::GetAttributeValue(
     const DWARFUnit *cu, const dw_attr_t attr, DWARFFormValue &form_value,
     dw_offset_t *end_attr_offset_ptr,
     bool check_specification_or_abstract_origin) const {
-  SymbolFileDWARFDwo *dwo_symbol_file = cu->GetDwoSymbolFile();
-  if (dwo_symbol_file && m_tag != DW_TAG_compile_unit &&
-                         m_tag != DW_TAG_partial_unit)
-    return GetAttributeValue(dwo_symbol_file->GetCompileUnit(), attr,
-                             form_value, end_attr_offset_ptr,
-                             check_specification_or_abstract_origin);
-
-  auto abbrevDecl = GetAbbreviationDeclarationPtr(cu);
-
-  if (abbrevDecl) {
+  if (const auto *abbrevDecl = GetAbbreviationDeclarationPtr(cu)) {
     uint32_t attr_idx = abbrevDecl->FindAttributeIndex(attr);
 
     if (attr_idx != DW_INVALID_INDEX) {
@@ -669,21 +645,7 @@ dw_offset_t DWARFDebugInfoEntry::GetAttributeValue(
       }
     }
   }
-
-  if (!dwo_symbol_file)
-    return 0;
-
-  DWARFUnit *dwo_cu = dwo_symbol_file->GetCompileUnit();
-  if (!dwo_cu)
-    return 0;
-
-  DWARFBaseDIE dwo_cu_die = dwo_cu->GetUnitDIEOnly();
-  if (!dwo_cu_die.IsValid())
-    return 0;
-
-  return dwo_cu_die.GetDIE()->GetAttributeValue(
-      dwo_cu, attr, form_value, end_attr_offset_ptr,
-      check_specification_or_abstract_origin);
+  return 0;
 }
 
 // GetAttributeValueAsString
@@ -785,7 +747,7 @@ bool DWARFDebugInfoEntry::GetAttributeAddressRange(
 }
 
 size_t DWARFDebugInfoEntry::GetAttributeAddressRanges(
-    const DWARFUnit *cu, DWARFRangeList &ranges, bool check_hi_lo_pc,
+    DWARFUnit *cu, DWARFRangeList &ranges, bool check_hi_lo_pc,
     bool check_specification_or_abstract_origin) const {
   ranges.Clear();
 
@@ -1029,210 +991,6 @@ DWARFDebugInfoEntry::GetQualifiedName(DWARFUnit *cu,
   if (storage.empty())
     return nullptr;
   return storage.c_str();
-}
-
-bool DWARFDebugInfoEntry::LookupAddress(const dw_addr_t address,
-                                        const DWARFUnit *cu,
-                                        DWARFDebugInfoEntry **function_die,
-                                        DWARFDebugInfoEntry **block_die) {
-  bool found_address = false;
-  if (m_tag) {
-    bool check_children = false;
-    bool match_addr_range = false;
-    //  printf("0x%8.8x: %30s: address = 0x%8.8x - ", m_offset,
-    //  DW_TAG_value_to_name(tag), address);
-    switch (m_tag) {
-    case DW_TAG_array_type:
-      break;
-    case DW_TAG_class_type:
-      check_children = true;
-      break;
-    case DW_TAG_entry_point:
-    case DW_TAG_enumeration_type:
-    case DW_TAG_formal_parameter:
-    case DW_TAG_imported_declaration:
-    case DW_TAG_label:
-      break;
-    case DW_TAG_lexical_block:
-      check_children = true;
-      match_addr_range = true;
-      break;
-    case DW_TAG_member:
-    case DW_TAG_pointer_type:
-    case DW_TAG_reference_type:
-      break;
-    case DW_TAG_compile_unit:
-      match_addr_range = true;
-      break;
-    case DW_TAG_string_type:
-      break;
-    case DW_TAG_structure_type:
-      check_children = true;
-      break;
-    case DW_TAG_subroutine_type:
-    case DW_TAG_typedef:
-    case DW_TAG_union_type:
-    case DW_TAG_unspecified_parameters:
-    case DW_TAG_variant:
-      break;
-    case DW_TAG_common_block:
-      check_children = true;
-      break;
-    case DW_TAG_common_inclusion:
-    case DW_TAG_inheritance:
-      break;
-    case DW_TAG_inlined_subroutine:
-      check_children = true;
-      match_addr_range = true;
-      break;
-    case DW_TAG_module:
-      match_addr_range = true;
-      break;
-    case DW_TAG_ptr_to_member_type:
-    case DW_TAG_set_type:
-    case DW_TAG_subrange_type:
-    case DW_TAG_with_stmt:
-    case DW_TAG_access_declaration:
-    case DW_TAG_base_type:
-      break;
-    case DW_TAG_catch_block:
-      match_addr_range = true;
-      break;
-    case DW_TAG_const_type:
-    case DW_TAG_constant:
-    case DW_TAG_enumerator:
-    case DW_TAG_file_type:
-    case DW_TAG_friend:
-    case DW_TAG_namelist:
-    case DW_TAG_namelist_item:
-    case DW_TAG_packed_type:
-      break;
-    case DW_TAG_subprogram:
-      match_addr_range = true;
-      break;
-    case DW_TAG_template_type_parameter:
-    case DW_TAG_template_value_parameter:
-    case DW_TAG_GNU_template_parameter_pack:
-    case DW_TAG_thrown_type:
-      break;
-    case DW_TAG_try_block:
-      match_addr_range = true;
-      break;
-    case DW_TAG_variant_part:
-    case DW_TAG_variable:
-    case DW_TAG_volatile_type:
-    case DW_TAG_dwarf_procedure:
-    case DW_TAG_restrict_type:
-    case DW_TAG_interface_type:
-      break;
-    case DW_TAG_namespace:
-      check_children = true;
-      break;
-    case DW_TAG_imported_module:
-    case DW_TAG_unspecified_type:
-      break;
-    case DW_TAG_partial_unit:
-      match_addr_range = true;
-      break;
-    case DW_TAG_imported_unit:
-    case DW_TAG_shared_type:
-    default:
-      break;
-    }
-
-    if (match_addr_range) {
-      dw_addr_t lo_pc =
-          GetAttributeValueAsAddress(cu, DW_AT_low_pc, LLDB_INVALID_ADDRESS);
-      if (lo_pc != LLDB_INVALID_ADDRESS) {
-        dw_addr_t hi_pc = GetAttributeHighPC(cu, lo_pc, LLDB_INVALID_ADDRESS);
-        if (hi_pc != LLDB_INVALID_ADDRESS) {
-          //  printf("\n0x%8.8x: %30s: address = 0x%8.8x  [0x%8.8x - 0x%8.8x) ",
-          //  m_offset, DW_TAG_value_to_name(tag), address, lo_pc, hi_pc);
-          if ((lo_pc <= address) && (address < hi_pc)) {
-            found_address = true;
-            //  puts("***MATCH***");
-            switch (m_tag) {
-            case DW_TAG_compile_unit: // File
-            case DW_TAG_partial_unit: // File
-              check_children =
-                  ((function_die != nullptr) || (block_die != nullptr));
-              break;
-
-            case DW_TAG_subprogram: // Function
-              if (function_die)
-                *function_die = this;
-              check_children = (block_die != nullptr);
-              break;
-
-            case DW_TAG_inlined_subroutine: // Inlined Function
-            case DW_TAG_lexical_block:      // Block { } in code
-              if (block_die) {
-                *block_die = this;
-                check_children = true;
-              }
-              break;
-
-            default:
-              check_children = true;
-              break;
-            }
-          }
-        } else {
-          // Compile units may not have a valid high/low pc when there
-          // are address gaps in subroutines so we must always search
-          // if there is no valid high and low PC.
-          check_children =
-              (m_tag == DW_TAG_compile_unit || m_tag == DW_TAG_partial_unit) &&
-              ((function_die != nullptr) || (block_die != nullptr));
-        }
-      } else {
-        DWARFRangeList ranges;
-        if (GetAttributeAddressRanges(cu, ranges, /*check_hi_lo_pc*/ false) &&
-            ranges.FindEntryThatContains(address)) {
-          found_address = true;
-          //  puts("***MATCH***");
-          switch (m_tag) {
-          case DW_TAG_compile_unit: // File
-          case DW_TAG_partial_unit: // File
-              check_children =
-                  ((function_die != nullptr) || (block_die != nullptr));
-              break;
-
-          case DW_TAG_subprogram: // Function
-            if (function_die)
-              *function_die = this;
-            check_children = (block_die != nullptr);
-            break;
-
-          case DW_TAG_inlined_subroutine: // Inlined Function
-          case DW_TAG_lexical_block:      // Block { } in code
-            if (block_die) {
-              *block_die = this;
-              check_children = true;
-            }
-            break;
-
-          default:
-            check_children = true;
-            break;
-          }
-        } else {
-          check_children = false;
-        }
-      }
-    }
-
-    if (check_children) {
-      //  printf("checking children\n");
-      DWARFDebugInfoEntry *child = GetFirstChild();
-      while (child) {
-        if (child->LookupAddress(address, cu, function_die, block_die))
-          return true;
-        child = child->GetSibling();
-      }
-    }
-  }
-  return found_address;
 }
 
 lldb::offset_t DWARFDebugInfoEntry::GetFirstAttributeOffset() const {

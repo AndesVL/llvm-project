@@ -16,7 +16,12 @@
 #include "RISCVFrameLowering.h"
 #include "RISCVISelLowering.h"
 #include "RISCVInstrInfo.h"
+#include "RISCVSelectionDAGInfo.h"
 #include "Utils/RISCVBaseInfo.h"
+#include "llvm/CodeGen/GlobalISel/CallLowering.h"
+#include "llvm/CodeGen/GlobalISel/InstructionSelector.h"
+#include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
+#include "llvm/CodeGen/GlobalISel/RegisterBankInfo.h"
 #include "llvm/CodeGen/SelectionDAGTargetInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DataLayout.h"
@@ -37,15 +42,19 @@ class RISCVSubtarget : public RISCVGenSubtargetInfo {
   bool HasStdExtC = false;
   bool HasRV64 = false;
   bool IsRV32E = false;
+  bool HasCheri = false;
+  bool IsCapMode = false;
   bool EnableLinkerRelax = false;
+  bool EnableRVCHintInstrs = false;
   unsigned XLen = 32;
   MVT XLenVT = MVT::i32;
   RISCVABI::ABI TargetABI = RISCVABI::ABI_Unknown;
+  BitVector UserReservedRegister;
   RISCVFrameLowering FrameLowering;
   RISCVInstrInfo InstrInfo;
   RISCVRegisterInfo RegInfo;
   RISCVTargetLowering TLInfo;
-  SelectionDAGTargetInfo TSInfo;
+  RISCVSelectionDAGInfo TSInfo;
 
   /// Initializes using the passed in CPU and feature strings so that we can
   /// use initializer lists for subtarget initialization.
@@ -75,6 +84,7 @@ public:
   const SelectionDAGTargetInfo *getSelectionDAGInfo() const override {
     return &TSInfo;
   }
+  bool enableMachineScheduler() const override { return true; }
   bool hasStdExtM() const { return HasStdExtM; }
   bool hasStdExtA() const { return HasStdExtA; }
   bool hasStdExtF() const { return HasStdExtF; }
@@ -82,10 +92,34 @@ public:
   bool hasStdExtC() const { return HasStdExtC; }
   bool is64Bit() const { return HasRV64; }
   bool isRV32E() const { return IsRV32E; }
+  bool hasCheri() const { return HasCheri; }
+  bool isCapMode() const { return IsCapMode; }
   bool enableLinkerRelax() const { return EnableLinkerRelax; }
+  bool enableRVCHintInstrs() const { return EnableRVCHintInstrs; }
   MVT getXLenVT() const { return XLenVT; }
   unsigned getXLen() const { return XLen; }
   RISCVABI::ABI getTargetABI() const { return TargetABI; }
+  bool isRegisterReservedByUser(Register i) const {
+    assert(i < RISCV::NUM_TARGET_REGS && "Register out of range");
+    return UserReservedRegister[i];
+  }
+  MVT typeForCapabilities() const {
+    assert(HasCheri && "Cannot get capability type for non-CHERI");
+    return is64Bit() ? MVT::iFATPTR128 : MVT::iFATPTR64;
+  }
+
+protected:
+  // GlobalISel related APIs.
+  std::unique_ptr<CallLowering> CallLoweringInfo;
+  std::unique_ptr<InstructionSelector> InstSelector;
+  std::unique_ptr<LegalizerInfo> Legalizer;
+  std::unique_ptr<RegisterBankInfo> RegBankInfo;
+
+public:
+  const CallLowering *getCallLowering() const override;
+  InstructionSelector *getInstructionSelector() const override;
+  const LegalizerInfo *getLegalizerInfo() const override;
+  const RegisterBankInfo *getRegBankInfo() const override;
 };
 } // End llvm namespace
 

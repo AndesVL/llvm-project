@@ -15,12 +15,12 @@
     unreachable
   }
 
-  attributes #0 = { noinline nounwind optnone "target-cpu"="cheri128" "target-features"="+cheri128" }
+  attributes #0 = { noinline nounwind optnone }
 
 ...
 ---
 name:            test_sandbox_cs_clock_gettime_default
-alignment:       3
+alignment:       8
 exposesReturnsTwice: false
 legalized:       false
 regBankSelected: false

@@ -32,13 +32,14 @@ public:
   void setSRetReturnReg(unsigned Reg) { SRetReturnReg = Reg; }
 
   bool globalBaseRegSet() const;
-  unsigned getGlobalBaseReg(bool IsForTls);
-  unsigned getGlobalBaseRegUnchecked() const;
+  Register getGlobalBaseReg(bool IsForTls);
+  Register getGlobalBaseRegUnchecked() const;
 
   bool capGlobalBaseRegSet() const;
-  unsigned getCapGlobalBaseReg();
-  unsigned getCapGlobalBaseRegForGlobalISel();
-  unsigned getGlobalBaseRegForGlobalISel();
+  Register getCapEntryPointReg();
+  Register getCapGlobalBaseReg();
+  Register getCapGlobalBaseRegForGlobalISel();
+  Register getGlobalBaseRegForGlobalISel();
 
   // Insert instructions to initialize the global base register in the
   // first MBB of the function.
@@ -109,7 +110,9 @@ private:
   /// CapGlobalBaseReg - keeps track of the virtual register initialized for
   /// use as the capability global base register. This is used for all global
   /// accesses in the purecap ABI.
-  unsigned CapGlobalBaseReg = 0;
+  Register CapGlobalBaseReg;
+  Register CapComputedEntryPoint; /// $pcc-derived entry point register
+  Register CapABIEntryPointReg; /// $c12 for the legacy ABI
 
   /// VarArgsFrameIndex - FrameIndex for start of varargs area.
   int VarArgsFrameIndex = 0;

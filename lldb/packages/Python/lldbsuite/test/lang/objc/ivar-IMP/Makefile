@@ -1,28 +1,8 @@
-LEVEL = ../../../make
+OBJC_SOURCES := myclass.m repro.m
+LD_EXTRAS := -framework Foundation
 
-CC ?= clang
-ifeq "$(ARCH)" ""
-        ARCH = x86_64
-endif
+include Makefile.rules
 
-ifeq "$(OS)" ""
-        OS = $(shell uname -s)
-endif
+# Force myclass.m to be compiled without debug info
+myclass.o: CFLAGS = $(CFLAGS_NO_DEBUG)
 
-CFLAGS ?= -g -O0
-CFLAGS_NO_DEBUG = 
-ifeq "$(OS)" "Darwin"
-        CFLAGS += -arch $(ARCH)
-		CFLAGS_NO_DEBUG += -arch $(ARCH)
-endif
-
-all: aout
-
-aout: 
-	$(CC) $(CFLAGS_NO_DEBUG) $(SRCDIR)/myclass.m -c -o myclass.o
-	$(CC) $(CFLAGS) myclass.o $(SRCDIR)/repro.m -framework Foundation
-
-clean::
-	rm -f myclass.o
-
-include $(LEVEL)/Makefile.rules

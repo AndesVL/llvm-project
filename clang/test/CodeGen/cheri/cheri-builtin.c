@@ -1,13 +1,15 @@
 // REQUIRES: mips-registered-target
 
-// RUN: %cheri_cc1 -o - -O0 -emit-llvm %s | FileCheck %s
+// RUN: %cheri128_cc1 -o - -O0 -emit-llvm %s | FileCheck %s --check-prefixes=CHECK,CHECK128
+// RUN: %cheri256_cc1 -o - -O0 -emit-llvm %s | FileCheck %s --check-prefixes=CHECK,CHECK256
 // FIXME: we shouldn't really be testing ASM output in clang
-// RUN: %cheri_cc1 -o - -O0 -S %s
-// RUN: %cheri_cc1 -o - -O0 -S %s | FileCheck %s -check-prefix=ASM
+// RUN: %cheri128_cc1 -o - -O0 -S %s | FileCheck %s -check-prefixes=ASM,ASM128
+// RUN: %cheri256_cc1 -o - -O0 -S %s | FileCheck %s -check-prefixes=ASM,ASM256
 void * __capability results[12];
 
 long long testDeprecated(void * __capability foo)
 {
+	// CHECK-LABEL: @testDeprecated(
 	long long x;
 	// CHECK: call i64 @llvm.cheri.cap.length.get.i64
 	// CHECK: call i64 @llvm.cheri.cap.perms.get.i64
@@ -36,6 +38,8 @@ long long testDeprecated(void * __capability foo)
 }
 long long test(void* __capability foo)
 {
+  // CHECK-LABEL: @test(
+  // ASM-LABEL: test:
   long long x;
   x &= __builtin_cheri_length_get(foo);
   // CHECK: call i64 @llvm.cheri.cap.length.get.i64
@@ -84,6 +88,9 @@ long long test(void* __capability foo)
   // CHECK: call i8 addrspace(200)* @llvm.cheri.cap.bounds.set.exact.i64(i8 addrspace(200)* {{.+}}, i64 43)
   // ASM: daddiu [[EXACT_SIZE:\$[0-9]+]], $zero, 43
   // ASM: csetboundsexact $c{{[0-9]+}}, $c{{[0-9]+}}, [[EXACT_SIZE]]
+  results[8] = __builtin_cheri_seal_entry(foo);
+  // CHECK: call i8 addrspace(200)* @llvm.cheri.cap.seal.entry(i8 addrspace(200)* {{.+}})
+  // ASM: csealentry $c{{[0-9]+}}, $c{{[0-9]+}}
 
   __builtin_mips_cheri_cause_set(42);
   // CHECK: call void @llvm.mips.cap.cause.set(i64 42)
@@ -111,10 +118,14 @@ void buildcap(void * __capability auth, __intcap_t bits) {
 
 
 int crap_cram(int len) {
-  return __builtin_cheri_round_representable_length(len) & __builtin_cheri_representable_alignment_mask(len);
   // CHECK-LABEL: @crap_cram(
+  // ASM-LABEL: crap_cram:
+  return __builtin_cheri_round_representable_length(len) & __builtin_cheri_representable_alignment_mask(len);
   // CHECK: call i64 @llvm.cheri.round.representable.length.i64(
   // CHECK: call i64 @llvm.cheri.representable.alignment.mask.i64(
-  // ASM: croundrepresentablelength	${{[0-9]+}}, ${{[0-9]+}}
-  // ASM: crepresentablealignmentmask	${{[0-9]+}}, ${{[0-9]+}}
+  // ASM128: croundrepresentablelength	${{[0-9]+}}, ${{[0-9]+}}
+  // ASM128: crepresentablealignmentmask	${{[0-9]+}}, ${{[0-9]+}}
+  // These are no-ops for 256 and should not be emitted:
+  // ASM256-NOT: croundrepresentablelength
+  // ASM256-NOT: crepresentablealignmentmask
 }

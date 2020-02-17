@@ -17,6 +17,7 @@
 #include "clang/Basic/MacroBuilder.h"
 #include "clang/Basic/TargetBuiltins.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/IR/DataLayout.h"
 
 using namespace clang;
 using namespace clang::targets;
@@ -46,7 +47,10 @@ const LangASMap AMDGPUTargetInfo::AMDGPUDefIsGenMap = {
     Generic,  // opencl_generic
     Global,   // cuda_device
     Constant, // cuda_constant
-    Local     // cuda_shared
+    Local,    // cuda_shared
+    Generic,  // ptr32_sptr
+    Generic,  // ptr32_uptr
+    Generic   // ptr64
 };
 
 const LangASMap AMDGPUTargetInfo::AMDGPUDefIsPrivMap = {
@@ -58,7 +62,11 @@ const LangASMap AMDGPUTargetInfo::AMDGPUDefIsPrivMap = {
     Generic,  // opencl_generic
     Global,   // cuda_device
     Constant, // cuda_constant
-    Local     // cuda_shared
+    Local,    // cuda_shared
+    Generic,  // ptr32_sptr
+    Generic,  // ptr32_uptr
+    Generic   // ptr64
+
 };
 } // namespace targets
 } // namespace clang
@@ -131,18 +139,31 @@ bool AMDGPUTargetInfo::initFeatureMap(
 
   // XXX - What does the member GPU mean if device name string passed here?
   if (isAMDGCN(getTriple())) {
-    if (CPU.empty())
-      CPU = "gfx600";
-
     switch (llvm::AMDGPU::parseArchAMDGCN(CPU)) {
+    case GK_GFX1012:
+    case GK_GFX1011:
+      Features["dot1-insts"] = true;
+      Features["dot2-insts"] = true;
+      Features["dot5-insts"] = true;
+      Features["dot6-insts"] = true;
+      LLVM_FALLTHROUGH;
     case GK_GFX1010:
       Features["dl-insts"] = true;
+      Features["ci-insts"] = true;
+      Features["flat-address-space"] = true;
       Features["16-bit-insts"] = true;
       Features["dpp"] = true;
+      Features["gfx8-insts"] = true;
       Features["gfx9-insts"] = true;
       Features["gfx10-insts"] = true;
       Features["s-memrealtime"] = true;
       break;
+    case GK_GFX908:
+      Features["dot3-insts"] = true;
+      Features["dot4-insts"] = true;
+      Features["dot5-insts"] = true;
+      Features["dot6-insts"] = true;
+      LLVM_FALLTHROUGH;
     case GK_GFX906:
       Features["dl-insts"] = true;
       Features["dot1-insts"] = true;
@@ -169,12 +190,13 @@ bool AMDGPUTargetInfo::initFeatureMap(
     case GK_GFX701:
     case GK_GFX700:
       Features["ci-insts"] = true;
+      Features["flat-address-space"] = true;
       LLVM_FALLTHROUGH;
     case GK_GFX601:
     case GK_GFX600:
       break;
     case GK_NONE:
-      return false;
+      break;
     default:
       llvm_unreachable("Unhandled GPU!");
     }
@@ -223,7 +245,8 @@ void AMDGPUTargetInfo::adjustTargetOptions(const CodeGenOptions &CGOpts,
   }
   if (!hasFP32Denormals)
     TargetOpts.Features.push_back(
-      (Twine(hasFastFMAF() && hasFullRateDenormalsF32() && !CGOpts.FlushDenorm
+      (Twine(hasFastFMAF() && hasFullRateDenormalsF32() &&
+             CGOpts.FP32DenormalMode == llvm::DenormalMode::IEEE
              ? '+' : '-') + Twine("fp32-denormals"))
             .str());
   // Always do not flush fp64 or fp16 denorms.

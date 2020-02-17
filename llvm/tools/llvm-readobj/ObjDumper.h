@@ -53,6 +53,7 @@ public:
   virtual void printUnwindInfo() = 0;
 
   // Only implemented for ELF at this time.
+  virtual void printDependentLibs() {}
   virtual void printDynamicRelocations() { }
   virtual void printDynamicTable() { }
   virtual void printNeededLibraries() { }
@@ -68,15 +69,9 @@ public:
   virtual void printAddrsig() {}
   virtual void printNotes() {}
   virtual void printELFLinkerOptions() {}
+  virtual void printStackSizes() {}
+  virtual void printArchSpecificInfo() { }
 
-  // Only implemented for ARM ELF at this time.
-  virtual void printAttributes() { }
-
-  // Only implemented for MIPS ELF at this time.
-  virtual void printMipsPLTGOT() { }
-  virtual void printMipsABIFlags() { }
-  virtual void printMipsReginfo() { }
-  virtual void printMipsOptions() { }
   virtual void printCheriCapRelocs() {}
   virtual void printCheriCapTable() {}
   virtual void printCheriCapTableMapping() {}
@@ -107,8 +102,10 @@ public:
 
   virtual void printStackMap() const = 0;
 
-  void printSectionAsString(const object::ObjectFile *Obj, StringRef SecName);
-  void printSectionAsHex(const object::ObjectFile *Obj, StringRef SecName);
+  void printSectionsAsString(const object::ObjectFile *Obj,
+                             ArrayRef<std::string> Sections);
+  void printSectionsAsHex(const object::ObjectFile *Obj,
+                          ArrayRef<std::string> Sections);
 
 protected:
   ScopedPrinter &W;

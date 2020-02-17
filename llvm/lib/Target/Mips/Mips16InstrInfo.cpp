@@ -69,8 +69,8 @@ unsigned Mips16InstrInfo::isStoreToStackSlot(const MachineInstr &MI,
 
 void Mips16InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
                                   MachineBasicBlock::iterator I,
-                                  const DebugLoc &DL, unsigned DestReg,
-                                  unsigned SrcReg, bool KillSrc) const {
+                                  const DebugLoc &DL, MCRegister DestReg,
+                                  MCRegister SrcReg, bool KillSrc) const {
   unsigned Opc = 0;
 
   if (Mips::CPU16RegsRegClass.contains(DestReg) &&
@@ -97,15 +97,11 @@ void Mips16InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     MIB.addReg(SrcReg, getKillRegState(KillSrc));
 }
 
-bool Mips16InstrInfo::isCopyInstrImpl(const MachineInstr &MI,
-                                      const MachineOperand *&Src,
-                                      const MachineOperand *&Dest) const {
-  if (MI.isMoveReg()) {
-    Dest = &MI.getOperand(0);
-    Src = &MI.getOperand(1);
-    return true;
-  }
-  return false;
+Optional<DestSourcePair>
+Mips16InstrInfo::isCopyInstrImpl(const MachineInstr &MI) const {
+  if (MI.isMoveReg())
+    return DestSourcePair{MI.getOperand(0), MI.getOperand(1)};
+  return None;
 }
 
 void Mips16InstrInfo::storeRegToStack(MachineBasicBlock &MBB,
@@ -359,7 +355,7 @@ unsigned Mips16InstrInfo::loadImmediate(unsigned FrameReg, int64_t Imm,
   for (unsigned i = 0, e = II->getNumOperands(); i != e; ++i) {
     MachineOperand &MO = II->getOperand(i);
     if (MO.isReg() && MO.getReg() != 0 && !MO.isDef() &&
-        !TargetRegisterInfo::isVirtualRegister(MO.getReg()))
+        !Register::isVirtualRegister(MO.getReg()))
       Candidates.reset(MO.getReg());
   }
 
@@ -419,8 +415,9 @@ unsigned Mips16InstrInfo::loadImmediate(unsigned FrameReg, int64_t Imm,
    else
      Available.reset(SpReg);
     copyPhysReg(MBB, II, DL, SpReg, Mips::SP, false);
-    BuildMI(MBB, II, DL, get(Mips::  AdduRxRyRz16), Reg).addReg(SpReg, RegState::Kill)
-      .addReg(Reg);
+    BuildMI(MBB, II, DL, get(Mips::AdduRxRyRz16), Reg)
+        .addReg(SpReg, RegState::Kill)
+        .addReg(Reg);
   }
   else
     BuildMI(MBB, II, DL, get(Mips::  AdduRxRyRz16), Reg).addReg(FrameReg)

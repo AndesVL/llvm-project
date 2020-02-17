@@ -18,6 +18,7 @@
 #include "Plugins/ABI/MacOSX-arm/ABIMacOSX_arm.h"
 #include "Plugins/ABI/MacOSX-arm64/ABIMacOSX_arm64.h"
 #include "Plugins/ABI/MacOSX-i386/ABIMacOSX_i386.h"
+#include "Plugins/ABI/SysV-arc/ABISysV_arc.h"
 #include "Plugins/ABI/SysV-arm/ABISysV_arm.h"
 #include "Plugins/ABI/SysV-arm64/ABISysV_arm64.h"
 #include "Plugins/ABI/SysV-hexagon/ABISysV_hexagon.h"
@@ -28,7 +29,9 @@
 #include "Plugins/ABI/SysV-ppc64/ABISysV_ppc64.h"
 #include "Plugins/ABI/SysV-s390x/ABISysV_s390x.h"
 #include "Plugins/ABI/SysV-x86_64/ABISysV_x86_64.h"
+#include "Plugins/ABI/Windows-x86_64/ABIWindows_x86_64.h"
 #include "Plugins/Architecture/Arm/ArchitectureArm.h"
+#include "Plugins/Architecture/Mips/ArchitectureMips.h"
 #include "Plugins/Architecture/PPC64/ArchitecturePPC64.h"
 #include "Plugins/Disassembler/llvm/DisassemblerLLVMC.h"
 #include "Plugins/DynamicLoader/MacOSX-DYLD/DynamicLoaderMacOS.h"
@@ -36,7 +39,10 @@
 #include "Plugins/DynamicLoader/POSIX-DYLD/DynamicLoaderPOSIXDYLD.h"
 #include "Plugins/DynamicLoader/Static/DynamicLoaderStatic.h"
 #include "Plugins/DynamicLoader/Windows-DYLD/DynamicLoaderWindowsDYLD.h"
+#include "Plugins/Instruction/ARM/EmulateInstructionARM.h"
 #include "Plugins/Instruction/ARM64/EmulateInstructionARM64.h"
+#include "Plugins/Instruction/MIPS/EmulateInstructionMIPS.h"
+#include "Plugins/Instruction/MIPS64/EmulateInstructionMIPS64.h"
 #include "Plugins/Instruction/PPC64/EmulateInstructionPPC64.h"
 #include "Plugins/InstrumentationRuntime/ASan/ASanRuntime.h"
 #include "Plugins/InstrumentationRuntime/MainThreadChecker/MainThreadCheckerRuntime.h"
@@ -51,10 +57,13 @@
 #include "Plugins/LanguageRuntime/ObjC/AppleObjCRuntime/AppleObjCRuntimeV2.h"
 #include "Plugins/LanguageRuntime/RenderScript/RenderScriptRuntime/RenderScriptRuntime.h"
 #include "Plugins/MemoryHistory/asan/MemoryHistoryASan.h"
+#include "Plugins/ObjectContainer/BSD-Archive/ObjectContainerBSDArchive.h"
+#include "Plugins/ObjectContainer/Universal-Mach-O/ObjectContainerUniversalMachO.h"
 #include "Plugins/ObjectFile/Breakpad/ObjectFileBreakpad.h"
 #include "Plugins/ObjectFile/ELF/ObjectFileELF.h"
 #include "Plugins/ObjectFile/Mach-O/ObjectFileMachO.h"
 #include "Plugins/ObjectFile/PECOFF/ObjectFilePECOFF.h"
+#include "Plugins/ObjectFile/wasm/ObjectFileWasm.h"
 #include "Plugins/Platform/Android/PlatformAndroid.h"
 #include "Plugins/Platform/FreeBSD/PlatformFreeBSD.h"
 #include "Plugins/Platform/Linux/PlatformLinux.h"
@@ -66,6 +75,7 @@
 #include "Plugins/Platform/gdb-server/PlatformRemoteGDBServer.h"
 #include "Plugins/Process/elf-core/ProcessElfCore.h"
 #include "Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "Plugins/Process/mach-core/ProcessMachCore.h"
 #include "Plugins/Process/minidump/ProcessMinidump.h"
 #include "Plugins/ScriptInterpreter/None/ScriptInterpreterNone.h"
 #include "Plugins/SymbolFile/Breakpad/SymbolFileBreakpad.h"
@@ -74,6 +84,7 @@
 #include "Plugins/SymbolFile/PDB/SymbolFilePDB.h"
 #include "Plugins/SymbolFile/Symtab/SymbolFileSymtab.h"
 #include "Plugins/SymbolVendor/ELF/SymbolVendorELF.h"
+#include "Plugins/SymbolVendor/wasm/SymbolVendorWasm.h"
 #include "Plugins/SystemRuntime/MacOSX/SystemRuntimeMacOSX.h"
 #include "Plugins/UnwindAssembly/InstEmulation/UnwindAssemblyInstEmulation.h"
 #include "Plugins/UnwindAssembly/x86/UnwindAssembly-x86.h"
@@ -83,11 +94,11 @@
 #include "Plugins/Platform/MacOSX/PlatformAppleTVSimulator.h"
 #include "Plugins/Platform/MacOSX/PlatformAppleWatchSimulator.h"
 #include "Plugins/Platform/MacOSX/PlatformDarwinKernel.h"
+#include "Plugins/Platform/MacOSX/PlatformRemoteAppleBridge.h"
 #include "Plugins/Platform/MacOSX/PlatformRemoteAppleTV.h"
 #include "Plugins/Platform/MacOSX/PlatformRemoteAppleWatch.h"
 #include "Plugins/Platform/MacOSX/PlatformiOSSimulator.h"
 #include "Plugins/Process/MacOSX-Kernel/ProcessKDP.h"
-#include "Plugins/Process/mach-core/ProcessMachCore.h"
 #include "Plugins/SymbolVendor/MacOSX/SymbolVendorMacOSX.h"
 #endif
 #include "Plugins/StructuredData/DarwinLog/StructuredDataDarwinLog.h"
@@ -111,6 +122,38 @@ SystemInitializerTest::SystemInitializerTest() {}
 
 SystemInitializerTest::~SystemInitializerTest() {}
 
+#define LLDB_PROCESS_AArch64(op)                                               \
+  ABIMacOSX_arm64::op();                                                       \
+  ABISysV_arm64::op();
+#define LLDB_PROCESS_ARM(op)                                                   \
+  ABIMacOSX_arm::op();                                                         \
+  ABISysV_arm::op();
+#define LLDB_PROCESS_Hexagon(op) ABISysV_hexagon::op();
+#define LLDB_PROCESS_Mips(op)                                                  \
+  ABISysV_mips::op();                                                          \
+  ABISysV_mips64::op();
+#define LLDB_PROCESS_PowerPC(op)                                               \
+  ABISysV_ppc::op();                                                          \
+  ABISysV_ppc64::op();
+#define LLDB_PROCESS_SystemZ(op) ABISysV_s390x::op();
+#define LLDB_PROCESS_X86(op)                                                   \
+  ABIMacOSX_i386::op();                                                        \
+  ABISysV_i386::op();                                                          \
+  ABISysV_x86_64::op();                                                        \
+  ABIWindows_x86_64::op();
+
+#define LLDB_PROCESS_AMDGPU(op)
+#define LLDB_PROCESS_ARC(op)
+#define LLDB_PROCESS_AVR(op)
+#define LLDB_PROCESS_BPF(op)
+#define LLDB_PROCESS_Lanai(op)
+#define LLDB_PROCESS_MSP430(op)
+#define LLDB_PROCESS_NVPTX(op)
+#define LLDB_PROCESS_RISCV(op)
+#define LLDB_PROCESS_Sparc(op)
+#define LLDB_PROCESS_WebAssembly(op)
+#define LLDB_PROCESS_XCore(op)
+
 llvm::Error SystemInitializerTest::Initialize() {
   if (auto e = SystemInitializerCommon::Initialize())
     return e;
@@ -119,9 +162,12 @@ llvm::Error SystemInitializerTest::Initialize() {
   ObjectFileELF::Initialize();
   ObjectFileMachO::Initialize();
   ObjectFilePECOFF::Initialize();
+  wasm::ObjectFileWasm::Initialize();
+
+  ObjectContainerBSDArchive::Initialize();
+  ObjectContainerUniversalMachO::Initialize();
 
   ScriptInterpreterNone::Initialize();
-
 
   platform_freebsd::PlatformFreeBSD::Initialize();
   platform_linux::PlatformLinux::Initialize();
@@ -144,27 +190,18 @@ llvm::Error SystemInitializerTest::Initialize() {
 
   ClangASTContext::Initialize();
 
-  ABIMacOSX_i386::Initialize();
-  ABIMacOSX_arm::Initialize();
-  ABIMacOSX_arm64::Initialize();
-  ABISysV_arm::Initialize();
-  ABISysV_arm64::Initialize();
-  ABISysV_hexagon::Initialize();
-  ABISysV_i386::Initialize();
-  ABISysV_x86_64::Initialize();
-  ABISysV_ppc::Initialize();
-  ABISysV_ppc64::Initialize();
-  ABISysV_mips::Initialize();
-  ABISysV_mips64::Initialize();
-  ABISysV_s390x::Initialize();
+#define LLVM_TARGET(t) LLDB_PROCESS_ ## t(Initialize)
+#include "llvm/Config/Targets.def"
 
   ArchitectureArm::Initialize();
+  ArchitectureMips::Initialize();
   ArchitecturePPC64::Initialize();
 
   DisassemblerLLVMC::Initialize();
 
   JITLoaderGDB::Initialize();
   ProcessElfCore::Initialize();
+  ProcessMachCore::Initialize();
   minidump::ProcessMinidump::Initialize();
   MemoryHistoryASan::Initialize();
   AddressSanitizerRuntime::Initialize();
@@ -177,10 +214,16 @@ llvm::Error SystemInitializerTest::Initialize() {
   SymbolFileDWARF::Initialize();
   SymbolFilePDB::Initialize();
   SymbolFileSymtab::Initialize();
+  wasm::SymbolVendorWasm::Initialize();
   UnwindAssemblyInstEmulation::Initialize();
   UnwindAssembly_x86::Initialize();
+
+  EmulateInstructionARM::Initialize();
   EmulateInstructionARM64::Initialize();
+  EmulateInstructionMIPS::Initialize();
+  EmulateInstructionMIPS64::Initialize();
   EmulateInstructionPPC64::Initialize();
+
   SymbolFileDWARFDebugMap::Initialize();
   ItaniumABILanguageRuntime::Initialize();
   AppleObjCRuntimeV2::Initialize();
@@ -201,16 +244,16 @@ llvm::Error SystemInitializerTest::Initialize() {
 #if defined(__APPLE__)
   SymbolVendorMacOSX::Initialize();
   ProcessKDP::Initialize();
-  ProcessMachCore::Initialize();
   PlatformAppleTVSimulator::Initialize();
   PlatformAppleWatchSimulator::Initialize();
   PlatformRemoteAppleTV::Initialize();
   PlatformRemoteAppleWatch::Initialize();
+  PlatformRemoteAppleBridge::Initialize();
   DynamicLoaderDarwinKernel::Initialize();
 #endif
 
-  // This plugin is valid on any host that talks to a Darwin remote.
-  // It shouldn't be limited to __APPLE__.
+  // This plugin is valid on any host that talks to a Darwin remote. It
+  // shouldn't be limited to __APPLE__.
   StructuredDataDarwinLog::Initialize();
 
   // Platform agnostic plugins
@@ -246,29 +289,25 @@ void SystemInitializerTest::Terminate() {
 
   ClangASTContext::Terminate();
 
-  ABIMacOSX_i386::Terminate();
-  ABIMacOSX_arm::Terminate();
-  ABIMacOSX_arm64::Terminate();
-  ABISysV_arm::Terminate();
-  ABISysV_arm64::Terminate();
-  ABISysV_hexagon::Terminate();
-  ABISysV_i386::Terminate();
-  ABISysV_x86_64::Terminate();
-  ABISysV_ppc::Terminate();
-  ABISysV_ppc64::Terminate();
-  ABISysV_mips::Terminate();
-  ABISysV_mips64::Terminate();
-  ABISysV_s390x::Terminate();
+  ArchitectureArm::Terminate();
+  ArchitectureMips::Terminate();
+  ArchitecturePPC64::Terminate();
+
+#define LLVM_TARGET(t) LLDB_PROCESS_ ## t(Terminate)
+#include "llvm/Config/Targets.def"
+
   DisassemblerLLVMC::Terminate();
 
   JITLoaderGDB::Terminate();
   ProcessElfCore::Terminate();
+  ProcessMachCore::Terminate();
   minidump::ProcessMinidump::Terminate();
   MemoryHistoryASan::Terminate();
   AddressSanitizerRuntime::Terminate();
   ThreadSanitizerRuntime::Terminate();
   UndefinedBehaviorSanitizerRuntime::Terminate();
   MainThreadCheckerRuntime::Terminate();
+  wasm::SymbolVendorWasm::Terminate();
   SymbolVendorELF::Terminate();
   breakpad::SymbolFileBreakpad::Terminate();
   SymbolFileDWARF::Terminate();
@@ -276,8 +315,13 @@ void SystemInitializerTest::Terminate() {
   SymbolFileSymtab::Terminate();
   UnwindAssembly_x86::Terminate();
   UnwindAssemblyInstEmulation::Terminate();
+
+  EmulateInstructionARM::Terminate();
   EmulateInstructionARM64::Terminate();
+  EmulateInstructionMIPS::Terminate();
+  EmulateInstructionMIPS64::Terminate();
   EmulateInstructionPPC64::Terminate();
+
   SymbolFileDWARFDebugMap::Terminate();
   ItaniumABILanguageRuntime::Terminate();
   AppleObjCRuntimeV2::Terminate();
@@ -291,13 +335,13 @@ void SystemInitializerTest::Terminate() {
 
 #if defined(__APPLE__)
   DynamicLoaderDarwinKernel::Terminate();
-  ProcessMachCore::Terminate();
   ProcessKDP::Terminate();
   SymbolVendorMacOSX::Terminate();
   PlatformAppleTVSimulator::Terminate();
   PlatformAppleWatchSimulator::Terminate();
   PlatformRemoteAppleTV::Terminate();
   PlatformRemoteAppleWatch::Terminate();
+  PlatformRemoteAppleBridge::Terminate();
 #endif
 
 #if defined(__FreeBSD__)
@@ -333,6 +377,10 @@ void SystemInitializerTest::Terminate() {
   ObjectFileELF::Terminate();
   ObjectFileMachO::Terminate();
   ObjectFilePECOFF::Terminate();
+  wasm::ObjectFileWasm::Terminate();
+
+  ObjectContainerBSDArchive::Terminate();
+  ObjectContainerUniversalMachO::Terminate();
 
   // Now shutdown the common parts, in reverse order.
   SystemInitializerCommon::Terminate();

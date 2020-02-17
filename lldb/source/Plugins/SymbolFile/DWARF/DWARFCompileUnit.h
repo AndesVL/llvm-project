@@ -21,11 +21,11 @@ public:
   static bool classof(const DWARFUnit *unit) { return !unit->IsTypeUnit(); }
 
 private:
-  DWARFCompileUnit(SymbolFileDWARF *dwarf, lldb::user_id_t uid,
+  DWARFCompileUnit(SymbolFileDWARF &dwarf, lldb::user_id_t uid,
                    const DWARFUnitHeader &header,
                    const DWARFAbbreviationDeclarationSet &abbrevs,
-                   DIERef::Section section)
-      : DWARFUnit(dwarf, uid, header, abbrevs, section) {}
+                   DIERef::Section section, bool is_dwo)
+      : DWARFUnit(dwarf, uid, header, abbrevs, section, is_dwo) {}
 
   DISALLOW_COPY_AND_ASSIGN(DWARFCompileUnit);
 

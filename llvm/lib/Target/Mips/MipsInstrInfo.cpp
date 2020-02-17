@@ -278,7 +278,8 @@ MipsInstrInfo::BranchType MipsInstrInfo::analyzeBranch(
   return BT_CondUncond;
 }
 
-bool MipsInstrInfo::isBranchOffsetInRange(unsigned BranchOpc, int64_t BrOffset) const {
+bool MipsInstrInfo::isBranchOffsetInRange(unsigned BranchOpc,
+                                          int64_t BrOffset) const {
   switch (BranchOpc) {
   case Mips::B:
   case Mips::BAL:
@@ -443,7 +444,6 @@ bool MipsInstrInfo::isBranchOffsetInRange(unsigned BranchOpc, int64_t BrOffset) 
 
   llvm_unreachable("Unknown branch instruction!");
 }
-
 
 /// Return the corresponding compact (no delay slot) form of a branch.
 unsigned MipsInstrInfo::getEquivalentCompactForm(
@@ -688,7 +688,8 @@ MipsInstrInfo::genInstrWithNewOpc(unsigned NewOpc,
   return MIB;
 }
 
-bool MipsInstrInfo::findCommutedOpIndices(MachineInstr &MI, unsigned &SrcOpIdx1,
+bool MipsInstrInfo::findCommutedOpIndices(const MachineInstr &MI,
+                                          unsigned &SrcOpIdx1,
                                           unsigned &SrcOpIdx2) const {
   assert(!MI.isBundle() &&
          "TargetInstrInfo::findCommutedOpIndices() can't handle bundles");

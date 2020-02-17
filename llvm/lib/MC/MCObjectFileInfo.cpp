@@ -18,6 +18,7 @@
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCSectionWasm.h"
+#include "llvm/MC/MCSectionXCOFF.h"
 
 using namespace llvm;
 
@@ -27,7 +28,7 @@ static bool useCompactUnwind(const Triple &T) {
     return false;
 
   // aarch64 always has it.
-  if (T.getArch() == Triple::aarch64)
+  if (T.getArch() == Triple::aarch64 || T.getArch() == Triple::aarch64_32)
     return true;
 
   // armv7k always has it.
@@ -39,8 +40,7 @@ static bool useCompactUnwind(const Triple &T) {
     return true;
 
   // And the iOS simulator.
-  if (T.isiOS() &&
-      (T.getArch() == Triple::x86_64 || T.getArch() == Triple::x86))
+  if (T.isiOS() && T.isX86())
     return true;
 
   return false;
@@ -56,7 +56,8 @@ void MCObjectFileInfo::initMachOMCObjectFileInfo(const Triple &T) {
           MachO::S_ATTR_STRIP_STATIC_SYMS | MachO::S_ATTR_LIVE_SUPPORT,
       SectionKind::getReadOnly());
 
-  if (T.isOSDarwin() && T.getArch() == Triple::aarch64)
+  if (T.isOSDarwin() &&
+      (T.getArch() == Triple::aarch64 || T.getArch() == Triple::aarch64_32))
     SupportsCompactUnwindWithoutEHFrame = true;
 
   if (T.isWatchABI())
@@ -190,9 +191,9 @@ void MCObjectFileInfo::initMachOMCObjectFileInfo(const Triple &T) {
         Ctx->getMachOSection("__LD", "__compact_unwind", MachO::S_ATTR_DEBUG,
                              SectionKind::getReadOnly());
 
-    if (T.getArch() == Triple::x86_64 || T.getArch() == Triple::x86)
+    if (T.isX86())
       CompactUnwindDwarfEHFrameOnly = 0x04000000;  // UNWIND_X86_64_MODE_DWARF
-    else if (T.getArch() == Triple::aarch64)
+    else if (T.getArch() == Triple::aarch64 || T.getArch() == Triple::aarch64_32)
       CompactUnwindDwarfEHFrameOnly = 0x03000000;  // UNWIND_ARM64_MODE_DWARF
     else if (T.getArch() == Triple::arm || T.getArch() == Triple::thumb)
       CompactUnwindDwarfEHFrameOnly = 0x04000000;  // UNWIND_ARM_MODE_DWARF
@@ -296,6 +297,8 @@ void MCObjectFileInfo::initMachOMCObjectFileInfo(const Triple &T) {
   TLSExtraDataSection = TLSTLVSection;
 }
 
+MCObjectFileInfo::~MCObjectFileInfo() {}
+
 void MCObjectFileInfo::initELFMCObjectFileInfo(const Triple &T, bool Large) {
   switch (T.getArch()) {
   case Triple::mips:
@@ -303,9 +306,14 @@ void MCObjectFileInfo::initELFMCObjectFileInfo(const Triple &T, bool Large) {
   case Triple::mips64:
   case Triple::mips64el:
   case Triple::cheri:
-    FDECFIEncoding = Ctx->getAsmInfo()->getCodePointerSize() == 4
-                         ? dwarf::DW_EH_PE_sdata4
-                         : dwarf::DW_EH_PE_sdata8;
+    // We cannot use DW_EH_PE_sdata8 for the large PositionIndependent case
+    // since there is no R_MIPS_PC64 relocation (only a 32-bit version).
+    if (PositionIndependent && !Large)
+      FDECFIEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
+    else
+      FDECFIEncoding = Ctx->getAsmInfo()->getCodePointerSize() == 4
+                           ? dwarf::DW_EH_PE_sdata4
+                           : dwarf::DW_EH_PE_sdata8;
     break;
   case Triple::ppc64:
   case Triple::ppc64le:
@@ -335,22 +343,6 @@ void MCObjectFileInfo::initELFMCObjectFileInfo(const Triple &T, bool Large) {
   unsigned EHSectionFlags = ELF::SHF_ALLOC;
   if (T.isOSSolaris() && T.getArch() != Triple::x86_64)
     EHSectionFlags |= ELF::SHF_WRITE;
-
-  // This is (currently) also true for MIPS
-  // TODO: add a T.isMIPS()?
-  switch (T.getArch()) {
-    case Triple::mips:
-    case Triple::mipsel:
-    case Triple::mips64:
-    case Triple::mips64el:
-    case Triple::cheri:
-      if (PositionIndependent) {
-        EHSectionFlags |= ELF::SHF_WRITE;
-      }
-      break;
-    default:
-      break;
-  }
 
   // ELF
   BSSSection = Ctx->getELFSection(".bss", ELF::SHT_NOBITS,
@@ -397,8 +389,18 @@ void MCObjectFileInfo::initELFMCObjectFileInfo(const Triple &T, bool Large) {
   // it contains relocatable pointers.  In PIC mode, this is probably a big
   // runtime hit for C++ apps.  Either the contents of the LSDA need to be
   // adjusted or this should be a data section.
+  unsigned LSDASectionFlags = ELF::SHF_ALLOC;
+
+  // In the CHERI pure-capability ABI we write capabilities to for the landing
+  // pads so the section must be relocated.
+  // XXX: Would be nice if there was a ELF::SHF_RELRO/SHF_INITIALIZED_DATA
+  //   so I don't also have to modify lld.
+  if (isCheriPurecapABI()) {
+    // TODO: Could we (ab)use SHF_OS_NONCONFORMING
+    LSDASectionFlags |= ELF::SHF_WRITE;
+  }
   LSDASection = Ctx->getELFSection(".gcc_except_table", ELF::SHT_PROGBITS,
-                                   ELF::SHF_ALLOC);
+                                   LSDASectionFlags);
 
   COFFDebugSymbolsSection = nullptr;
   COFFDebugTypesSection = nullptr;
@@ -478,6 +480,11 @@ void MCObjectFileInfo::initELFMCObjectFileInfo(const Triple &T, bool Large) {
                                              DebugSecType, ELF::SHF_EXCLUDE);
   DwarfRnglistsDWOSection =
       Ctx->getELFSection(".debug_rnglists.dwo", DebugSecType, ELF::SHF_EXCLUDE);
+  DwarfMacinfoDWOSection =
+      Ctx->getELFSection(".debug_macinfo.dwo", DebugSecType, ELF::SHF_EXCLUDE);
+
+  DwarfLoclistsDWOSection =
+      Ctx->getELFSection(".debug_loclists.dwo", DebugSecType, ELF::SHF_EXCLUDE);
 
   // DWP Sections
   DwarfCUIndexSection =
@@ -495,9 +502,6 @@ void MCObjectFileInfo::initELFMCObjectFileInfo(const Triple &T, bool Large) {
       Ctx->getELFSection(".eh_frame", EHSectionType, EHSectionFlags);
 
   StackSizesSection = Ctx->getELFSection(".stack_sizes", ELF::SHT_PROGBITS, 0);
-
-  RemarksSection =
-      Ctx->getELFSection(".remarks", ELF::SHT_PROGBITS, ELF::SHF_EXCLUDE);
 }
 
 void MCObjectFileInfo::initCOFFMCObjectFileInfo(const Triple &T) {
@@ -634,6 +638,11 @@ void MCObjectFileInfo::initCOFFMCObjectFileInfo(const Triple &T) {
       COFF::IMAGE_SCN_MEM_DISCARDABLE | COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
           COFF::IMAGE_SCN_MEM_READ,
       SectionKind::getMetadata(), "debug_macinfo");
+  DwarfMacinfoDWOSection = Ctx->getCOFFSection(
+      ".debug_macinfo.dwo",
+      COFF::IMAGE_SCN_MEM_DISCARDABLE | COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+          COFF::IMAGE_SCN_MEM_READ,
+      SectionKind::getMetadata(), "debug_macinfo.dwo");
   DwarfInfoDWOSection = Ctx->getCOFFSection(
       ".debug_info.dwo",
       COFF::IMAGE_SCN_MEM_DISCARDABLE | COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
@@ -730,6 +739,11 @@ void MCObjectFileInfo::initCOFFMCObjectFileInfo(const Triple &T) {
                                          COFF::IMAGE_SCN_MEM_READ,
                                      SectionKind::getMetadata());
 
+  GLJMPSection = Ctx->getCOFFSection(".gljmp$y",
+                                     COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                         COFF::IMAGE_SCN_MEM_READ,
+                                     SectionKind::getMetadata());
+
   TLSDataSection = Ctx->getCOFFSection(
       ".tls$", COFF::IMAGE_SCN_CNT_INITIALIZED_DATA | COFF::IMAGE_SCN_MEM_READ |
                    COFF::IMAGE_SCN_MEM_WRITE,
@@ -776,6 +790,24 @@ void MCObjectFileInfo::initWasmMCObjectFileInfo(const Triple &T) {
                                     SectionKind::getReadOnlyWithRel());
 
   // TODO: Define more sections.
+}
+
+void MCObjectFileInfo::initXCOFFMCObjectFileInfo(const Triple &T) {
+  // The default csect for program code. Functions without a specified section
+  // get placed into this csect. The choice of csect name is not a property of
+  // the ABI or object file format. For example, the XL compiler uses an unnamed
+  // csect for program code.
+  TextSection = Ctx->getXCOFFSection(
+      ".text", XCOFF::StorageMappingClass::XMC_PR, XCOFF::XTY_SD,
+      XCOFF::C_HIDEXT, SectionKind::getText());
+
+  DataSection = Ctx->getXCOFFSection(
+      ".data", XCOFF::StorageMappingClass::XMC_RW, XCOFF::XTY_SD,
+      XCOFF::C_HIDEXT, SectionKind::getData());
+
+  ReadOnlySection = Ctx->getXCOFFSection(
+      ".rodata", XCOFF::StorageMappingClass::XMC_RO, XCOFF::XTY_SD,
+      XCOFF::C_HIDEXT, SectionKind::getReadOnly());
 }
 
 void MCObjectFileInfo::InitMCObjectFileInfo(const Triple &TheTriple, bool PIC,
@@ -826,8 +858,7 @@ void MCObjectFileInfo::InitMCObjectFileInfo(const Triple &TheTriple, bool PIC,
     break;
   case Triple::XCOFF:
     Env = IsXCOFF;
-    // TODO: Initialize MCObjectFileInfo for XCOFF format when
-    // MCSectionXCOFF is ready.
+    initXCOFFMCObjectFileInfo(TT);
     break;
   case Triple::UnknownObjectFormat:
     report_fatal_error("Cannot initialize MC for unknown object file format.");

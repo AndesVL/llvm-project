@@ -239,7 +239,7 @@ static void mergeInlinedArrayAllocas(
         }
 
         if (Align1 > Align2)
-          AvailableAlloca->setAlignment(AI->getAlignment());
+          AvailableAlloca->setAlignment(MaybeAlign(AI->getAlignment()));
       }
 
       AI->eraseFromParent();
@@ -284,7 +284,7 @@ static InlineResult InlineCallIfPossible(
   // Try to inline the function.  Get the list of static allocas that were
   // inlined.
   InlineResult IR = InlineFunction(CS, IFI, &AAR, InsertLifetime);
-  if (!IR)
+  if (!IR.isSuccess())
     return IR;
 
   if (InlinerFunctionImportStats != InlinerFunctionImportStatsOpts::No)
@@ -527,7 +527,8 @@ static void setInlineRemark(CallSite &CS, StringRef message) {
 static bool
 inlineCallsImpl(CallGraphSCC &SCC, CallGraph &CG,
                 std::function<AssumptionCache &(Function &)> GetAssumptionCache,
-                ProfileSummaryInfo *PSI, TargetLibraryInfo &TLI,
+                ProfileSummaryInfo *PSI,
+                std::function<TargetLibraryInfo &(Function &)> GetTLI,
                 bool InsertLifetime,
                 function_ref<InlineCost(CallSite CS)> GetInlineCost,
                 function_ref<AAResults &(Function &)> AARGetter,
@@ -626,7 +627,8 @@ inlineCallsImpl(CallGraphSCC &SCC, CallGraph &CG,
 
       Instruction *Instr = CS.getInstruction();
 
-      bool IsTriviallyDead = isInstructionTriviallyDead(Instr, &TLI);
+      bool IsTriviallyDead =
+          isInstructionTriviallyDead(Instr, &GetTLI(*Caller));
 
       int InlineHistoryID;
       if (!IsTriviallyDead) {
@@ -685,13 +687,15 @@ inlineCallsImpl(CallGraphSCC &SCC, CallGraph &CG,
         InlineResult IR = InlineCallIfPossible(
             CS, InlineInfo, InlinedArrayAllocas, InlineHistoryID,
             InsertLifetime, AARGetter, ImportedFunctionsStats);
-        if (!IR) {
-          setInlineRemark(CS, std::string(IR) + "; " + inlineCostStr(*OIC));
+        if (!IR.isSuccess()) {
+          setInlineRemark(CS, std::string(IR.getFailureReason()) + "; " +
+                                  inlineCostStr(*OIC));
           ORE.emit([&]() {
             return OptimizationRemarkMissed(DEBUG_TYPE, "NotInlined", DLoc,
                                             Block)
                    << NV("Callee", Callee) << " will not be inlined into "
-                   << NV("Caller", Caller) << ": " << NV("Reason", IR.message);
+                   << NV("Caller", Caller) << ": "
+                   << NV("Reason", IR.getFailureReason());
           });
           continue;
         }
@@ -757,13 +761,16 @@ bool LegacyInlinerBase::inlineCalls(CallGraphSCC &SCC) {
   CallGraph &CG = getAnalysis<CallGraphWrapperPass>().getCallGraph();
   ACT = &getAnalysis<AssumptionCacheTracker>();
   PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
-  auto &TLI = getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+  auto GetTLI = [&](Function &F) -> TargetLibraryInfo & {
+    return getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(F);
+  };
   auto GetAssumptionCache = [&](Function &F) -> AssumptionCache & {
     return ACT->getAssumptionCache(F);
   };
-  return inlineCallsImpl(SCC, CG, GetAssumptionCache, PSI, TLI, InsertLifetime,
-                         [this](CallSite CS) { return getInlineCost(CS); },
-                         LegacyAARGetter(*this), ImportedFunctionsStats);
+  return inlineCallsImpl(
+      SCC, CG, GetAssumptionCache, PSI, GetTLI, InsertLifetime,
+      [this](CallSite CS) { return getInlineCost(CS); }, LegacyAARGetter(*this),
+      ImportedFunctionsStats);
 }
 
 /// Remove now-dead linkonce functions at the end of
@@ -879,7 +886,7 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
   if (!ImportedFunctionsStats &&
       InlinerFunctionImportStats != InlinerFunctionImportStatsOpts::No) {
     ImportedFunctionsStats =
-        llvm::make_unique<ImportedFunctionsInliningStatistics>();
+        std::make_unique<ImportedFunctionsInliningStatistics>();
     ImportedFunctionsStats->setModuleInfo(M);
   }
 
@@ -1071,12 +1078,14 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
       using namespace ore;
 
       InlineResult IR = InlineFunction(CS, IFI);
-      if (!IR) {
-        setInlineRemark(CS, std::string(IR) + "; " + inlineCostStr(*OIC));
+      if (!IR.isSuccess()) {
+        setInlineRemark(CS, std::string(IR.getFailureReason()) + "; " +
+                                inlineCostStr(*OIC));
         ORE.emit([&]() {
           return OptimizationRemarkMissed(DEBUG_TYPE, "NotInlined", DLoc, Block)
                  << NV("Callee", &Callee) << " will not be inlined into "
-                 << NV("Caller", &F) << ": " << NV("Reason", IR.message);
+                 << NV("Caller", &F) << ": "
+                 << NV("Reason", IR.getFailureReason());
         });
         continue;
       }

@@ -12,6 +12,7 @@
 #include "DWARFDataExtractor.h"
 #include "lldb/Core/Section.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/Support/Threading.h"
 #include <memory>
 
@@ -20,6 +21,7 @@ class DWARFContext {
 private:
   SectionList *m_main_section_list;
   SectionList *m_dwo_section_list;
+  mutable std::unique_ptr<llvm::DWARFContext> m_llvm_context;
 
   struct SectionData {
     llvm::once_flag flag;
@@ -32,12 +34,14 @@ private:
   SectionData m_data_debug_info;
   SectionData m_data_debug_line;
   SectionData m_data_debug_line_str;
+  SectionData m_data_debug_loc;
+  SectionData m_data_debug_loclists;
   SectionData m_data_debug_macro;
+  SectionData m_data_debug_ranges;
+  SectionData m_data_debug_rnglists;
   SectionData m_data_debug_str;
   SectionData m_data_debug_str_offsets;
   SectionData m_data_debug_types;
-
-  bool isDwo() { return m_dwo_section_list != nullptr; }
 
   const DWARFDataExtractor &
   LoadOrGetSection(lldb::SectionType main_section_type,
@@ -56,10 +60,18 @@ public:
   const DWARFDataExtractor &getOrLoadDebugInfoData();
   const DWARFDataExtractor &getOrLoadLineData();
   const DWARFDataExtractor &getOrLoadLineStrData();
+  const DWARFDataExtractor &getOrLoadLocData();
+  const DWARFDataExtractor &getOrLoadLocListsData();
   const DWARFDataExtractor &getOrLoadMacroData();
+  const DWARFDataExtractor &getOrLoadRangesData();
+  const DWARFDataExtractor &getOrLoadRngListsData();
   const DWARFDataExtractor &getOrLoadStrData();
   const DWARFDataExtractor &getOrLoadStrOffsetsData();
   const DWARFDataExtractor &getOrLoadDebugTypesData();
+
+  bool isDwo() { return m_dwo_section_list != nullptr; }
+
+  llvm::DWARFContext &GetAsLLVM();
 };
 } // namespace lldb_private
 

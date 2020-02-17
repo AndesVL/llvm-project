@@ -10,7 +10,10 @@
 #include "InputInfo.h"
 #include "ToolChains/Arch/ARM.h"
 #include "ToolChains/Arch/Mips.h"
+#include "ToolChains/Arch/RISCV.h"
 #include "ToolChains/Clang.h"
+#include "ToolChains/InterfaceStubs.h"
+#include "ToolChains/Flang.h"
 #include "clang/Basic/ObjCRuntime.h"
 #include "clang/Basic/Sanitizers.h"
 #include "clang/Config/config.h"
@@ -85,6 +88,14 @@ ToolChain::ToolChain(const Driver &D, const llvm::Triple &T,
   std::string CandidateLibPath = getArchSpecificLibPath();
   if (getVFS().exists(CandidateLibPath))
     getFilePaths().push_back(CandidateLibPath);
+
+  IsCheriPurecap = Triple.getEnvironment() == llvm::Triple::CheriPurecap;
+  if (Triple.isMIPS() && tools::mips::hasMipsAbiArg(Args, "purecap"))
+    IsCheriPurecap = true;
+  if (Triple.isRISCV() && tools::riscv::isCheriPurecap(Args, Triple))
+    IsCheriPurecap = true;
+
+  // FIXME: Should we update triple enviroment to purecap? Or will that break RISCV?
 }
 
 void ToolChain::setTripleEnvironment(llvm::Triple::EnvironmentType Env) {
@@ -111,6 +122,11 @@ bool ToolChain::useRelaxRelocations() const {
 
 bool ToolChain::isNoExecStackDefault() const {
     return false;
+}
+
+bool ToolChain::isCheriPurecap() const {
+  return IsCheriPurecap ||
+         EffectiveTriple.getEnvironment() == llvm::Triple::CheriPurecap;
 }
 
 const SanitizerArgs& ToolChain::getSanitizerArgs() const {
@@ -151,6 +167,7 @@ static const DriverSuffix *FindDriverSuffix(StringRef ProgName, size_t &Pos) {
       {"cpp", "--driver-mode=cpp"},
       {"cl", "--driver-mode=cl"},
       {"++", "--driver-mode=g++"},
+      {"flang", "--driver-mode=flang"},
   };
 
   for (size_t i = 0; i < llvm::array_lengthof(DriverSuffixes); ++i) {
@@ -254,6 +271,12 @@ Tool *ToolChain::getClang() const {
   return Clang.get();
 }
 
+Tool *ToolChain::getFlang() const {
+  if (!Flang)
+    Flang.reset(new tools::Flang(*this));
+  return Flang.get();
+}
+
 Tool *ToolChain::buildAssembler() const {
   return new tools::ClangAs(*this);
 }
@@ -280,16 +303,31 @@ Tool *ToolChain::getLink() const {
   return Link.get();
 }
 
+Tool *ToolChain::getIfsMerge() const {
+  if (!IfsMerge)
+    IfsMerge.reset(new tools::ifstool::Merger(*this));
+  return IfsMerge.get();
+}
+
 Tool *ToolChain::getOffloadBundler() const {
   if (!OffloadBundler)
     OffloadBundler.reset(new tools::OffloadBundler(*this));
   return OffloadBundler.get();
 }
 
+Tool *ToolChain::getOffloadWrapper() const {
+  if (!OffloadWrapper)
+    OffloadWrapper.reset(new tools::OffloadWrapper(*this));
+  return OffloadWrapper.get();
+}
+
 Tool *ToolChain::getTool(Action::ActionClass AC) const {
   switch (AC) {
   case Action::AssembleJobClass:
     return getAssemble();
+
+  case Action::IfsMergeJobClass:
+    return getIfsMerge();
 
   case Action::LinkJobClass:
     return getLink();
@@ -315,6 +353,9 @@ Tool *ToolChain::getTool(Action::ActionClass AC) const {
   case Action::OffloadBundlingJobClass:
   case Action::OffloadUnbundlingJobClass:
     return getOffloadBundler();
+
+  case Action::OffloadWrapperJobClass:
+    return getOffloadWrapper();
   }
 
   llvm_unreachable("Invalid tool kind.");
@@ -334,7 +375,7 @@ static StringRef getArchNameForCompilerRTLib(const ToolChain &TC,
   if (TC.getArch() == llvm::Triple::x86 && Triple.isAndroid())
     return "i686";
 
-  if (Triple.getEnvironment() == llvm::Triple::CheriPurecap) {
+  if (Triple.isMIPS() && Triple.getEnvironment() == llvm::Triple::CheriPurecap) {
     assert(Triple.getSubArch() != llvm::Triple::NoSubArch && "purecap triple should have subarch");
     return Triple.getArchName();
   }
@@ -456,6 +497,9 @@ std::string ToolChain::getArchSpecificLibPath() const {
 }
 
 bool ToolChain::needsProfileRT(const ArgList &Args) {
+  if (Args.hasArg(options::OPT_noprofilelib))
+    return false;
+
   if (needsGCovInstrumentation(Args) ||
       Args.hasArg(options::OPT_fprofile_generate) ||
       Args.hasArg(options::OPT_fprofile_generate_EQ) ||
@@ -477,6 +521,7 @@ bool ToolChain::needsGCovInstrumentation(const llvm::opt::ArgList &Args) {
 }
 
 Tool *ToolChain::SelectTool(const JobAction &JA) const {
+  if (D.IsFlangMode() && getDriver().ShouldUseFlangCompiler(JA)) return getFlang();
   if (getDriver().ShouldUseClangCompiler(JA)) return getClang();
   Action::ActionClass AC = JA.getKind();
   if (AC == Action::AssembleJobClass && useIntegratedAs())
@@ -525,7 +570,15 @@ std::string ToolChain::GetLinkerPath() const {
 }
 
 types::ID ToolChain::LookupTypeForExtension(StringRef Ext) const {
-  return types::lookupTypeForExtension(Ext);
+  types::ID id = types::lookupTypeForExtension(Ext);
+
+  // Flang always runs the preprocessor and has no notion of "preprocessed
+  // fortran". Here, TY_PP_Fortran is coerced to TY_Fortran to avoid treating
+  // them differently.
+  if (D.IsFlangMode() && id == types::TY_PP_Fortran)
+    id = types::TY_Fortran;
+
+  return id;
 }
 
 bool ToolChain::HasNativeLLVMSupport() const {
@@ -604,6 +657,8 @@ std::string ToolChain::ComputeLLVMTriple(const ArgList &Args,
     Triple.setArchName("arm64");
     return Triple.getTriple();
   }
+  case llvm::Triple::aarch64_32:
+    return getTripleString();
   case llvm::Triple::arm:
   case llvm::Triple::armeb:
   case llvm::Triple::thumb:
@@ -815,7 +870,7 @@ void ToolChain::addExternCSystemIncludeIfExists(const ArgList &DriverArgs,
 /*static*/ void ToolChain::addSystemIncludes(const ArgList &DriverArgs,
                                              ArgStringList &CC1Args,
                                              ArrayRef<StringRef> Paths) {
-  for (const auto Path : Paths) {
+  for (const auto &Path : Paths) {
     CC1Args.push_back("-internal-isystem");
     CC1Args.push_back(DriverArgs.MakeArgString(Path));
   }
@@ -833,6 +888,16 @@ void ToolChain::AddClangCXXStdlibIncludeArgs(const ArgList &DriverArgs,
   // header search paths with it. Once all systems are overriding this
   // function, the CC1 flag and this line can be removed.
   DriverArgs.AddAllArgs(CC1Args, options::OPT_stdlib_EQ);
+}
+
+void ToolChain::AddClangCXXStdlibIsystemArgs(
+    const llvm::opt::ArgList &DriverArgs,
+    llvm::opt::ArgStringList &CC1Args) const {
+  DriverArgs.ClaimAllArgs(options::OPT_stdlibxx_isystem);
+  if (!DriverArgs.hasArg(options::OPT_nostdincxx))
+    for (const auto &P :
+         DriverArgs.getAllArgValues(options::OPT_stdlibxx_isystem))
+      addSystemInclude(DriverArgs, CC1Args, P);
 }
 
 bool ToolChain::ShouldLinkCXXStdlib(const llvm::opt::ArgList &Args) const {
@@ -902,6 +967,7 @@ SanitizerMask ToolChain::getSupportedSanitizers() const {
                        ~SanitizerKind::Function) |
                       (SanitizerKind::CFI & ~SanitizerKind::CFIICall) |
                       SanitizerKind::CFICastStrict |
+                      SanitizerKind::FloatDivideByZero |
                       SanitizerKind::UnsignedIntegerOverflow |
                       SanitizerKind::ImplicitConversion |
                       SanitizerKind::Nullability | SanitizerKind::LocalBounds;
@@ -915,6 +981,9 @@ SanitizerMask ToolChain::getSupportedSanitizers() const {
   if (getTriple().getArch() == llvm::Triple::x86_64 ||
       getTriple().getArch() == llvm::Triple::aarch64)
     Res |= SanitizerKind::ShadowCallStack;
+  if (getTriple().getArch() == llvm::Triple::aarch64 ||
+      getTriple().getArch() == llvm::Triple::aarch64_be)
+    Res |= SanitizerKind::MemTag;
   return Res;
 }
 

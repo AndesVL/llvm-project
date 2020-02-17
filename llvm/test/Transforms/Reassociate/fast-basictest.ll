@@ -586,12 +586,10 @@ define float @test18(float %a, float %b, float %z) {
   ret float %f
 }
 
-; FIXME: This reassociation is not working.
 define float @test18_unary_fneg(float %a, float %b, float %z) {
 ; CHECK-LABEL: @test18_unary_fneg(
-; CHECK-NEXT:    [[C:%.*]] = fmul fast float [[Z:%.*]], -4.000000e+01
-; CHECK-NEXT:    [[E:%.*]] = fmul fast float [[C]], [[A:%.*]]
-; CHECK-NEXT:    [[F:%.*]] = fneg fast float [[E]]
+; CHECK-NEXT:    [[E:%.*]] = fmul fast float [[A:%.*]], 4.000000e+01
+; CHECK-NEXT:    [[F:%.*]] = fmul fast float [[E]], [[Z:%.*]]
 ; CHECK-NEXT:    ret float [[F]]
 ;
   %d = fmul fast float %z, 4.000000e+01
@@ -613,6 +611,34 @@ define float @test18_reassoc(float %a, float %b, float %z) {
   %c = fsub reassoc float 0.000000e+00, %d
   %e = fmul reassoc float %a, %c
   %f = fsub reassoc float 0.000000e+00, %e
+  ret float %f
+}
+
+; fneg of fneg is an identity operation, so no FMF are needed to remove those instructions.
+
+define float @test18_unary_fneg_no_FMF(float %a, float %b, float %z) {
+; CHECK-LABEL: @test18_unary_fneg_no_FMF(
+; CHECK-NEXT:    [[TMP1:%.*]] = fmul float [[Z:%.*]], 4.000000e+01
+; CHECK-NEXT:    [[F:%.*]] = fmul float [[TMP1]], [[A:%.*]]
+; CHECK-NEXT:    ret float [[F]]
+;
+  %d = fmul float %z, 4.000000e+01
+  %c = fneg float %d
+  %e = fmul float %a, %c
+  %f = fneg float %e
+  ret float %f
+}
+
+define float @test18_reassoc_unary_fneg(float %a, float %b, float %z) {
+; CHECK-LABEL: @test18_reassoc_unary_fneg(
+; CHECK-NEXT:    [[TMP1:%.*]] = fmul reassoc float [[Z:%.*]], 4.000000e+01
+; CHECK-NEXT:    [[F:%.*]] = fmul reassoc float [[TMP1]], [[A:%.*]]
+; CHECK-NEXT:    ret float [[F]]
+;
+  %d = fmul reassoc float %z, 4.000000e+01
+  %c = fneg reassoc float %d
+  %e = fmul reassoc float %a, %c
+  %f = fneg reassoc float %e
   ret float %f
 }
 
@@ -643,13 +669,9 @@ define float @test19_reassoc(float %A, float %B) {
 
 ; With sub reassociation, constant folding can eliminate the uses of %a.
 define float @test20(float %a, float %b, float %c) nounwind  {
-; FIXME: Should be able to generate the below, which may expose more
-;        opportunites for FAdd reassociation.
-; %sum = fadd fast float %c, %b
-; %t7 = fsub fast float 0, %sum
 ; CHECK-LABEL: @test20(
-; CHECK-NEXT:    [[B_NEG:%.*]] = fsub fast float -0.000000e+00, [[B:%.*]]
-; CHECK-NEXT:    [[T7:%.*]] = fsub fast float [[B_NEG]], [[C:%.*]]
+; CHECK-NEXT:    [[TMP1:%.*]] = fadd fast float [[B:%.*]], [[C:%.*]]
+; CHECK-NEXT:    [[T7:%.*]] = fsub fast float -0.000000e+00, [[TMP1]]
 ; CHECK-NEXT:    ret float [[T7]]
 ;
   %t3 = fsub fast float %a, %b

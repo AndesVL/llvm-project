@@ -52,6 +52,7 @@ set(PROFILE_SOURCES
   GCDAProfiling.c
   InstrProfiling.c
   InstrProfilingValue.c
+  InstrProfilingBiasVar.c
   InstrProfilingBuffer.c
   InstrProfilingFile.c
   InstrProfilingMerge.c
@@ -63,20 +64,26 @@ set(PROFILE_SOURCES
   InstrProfilingPlatformLinux.c
   InstrProfilingPlatformOther.c
   InstrProfilingPlatformWindows.c
-  InstrProfilingRuntime.cc
-  InstrProfilingUtil.c)
+  InstrProfilingRuntime.cpp
+  InstrProfilingUtil.c
+  )
 
 set(PROFILE_HEADERS
-  InstrProfData.inc
   InstrProfiling.h
   InstrProfilingInternal.h
   InstrProfilingPort.h
   InstrProfilingUtil.h
-  WindowsMMap.h)
+  WindowsMMap.h
+  )
 
 if(WIN32)
-    list(APPEND PROFILE_SOURCES WindowsMMap.c)
+  list(APPEND PROFILE_SOURCES
+    WindowsMMap.c
+    )
 endif()
+
+include_directories(..)
+include_directories(../../include)
 
 if(FUCHSIA OR UNIX)
  set(EXTRA_FLAGS

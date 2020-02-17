@@ -96,7 +96,7 @@
   ; Function Attrs: nounwind
   declare void @llvm.stackprotector(i8*, i8**)
 
-  attributes #0 = { nounwind uwtable "no-frame-pointer-elim"="false" "no-frame-pointer-elim-non-leaf" }
+  attributes #0 = { nounwind uwtable "frame-pointer"="non-leaf" }
   
   !llvm.dbg.cu = !{!0}
   !llvm.module.flags = !{!3, !4, !5}
@@ -126,7 +126,7 @@
 ...
 ---
 name:            foo
-alignment:       4
+alignment:       16
 frameInfo:       
   stackSize:       24
   offsetAdjustment: -24
@@ -134,12 +134,12 @@ frameInfo:
   adjustsStack:    true
   hasCalls:        true
 fixedStack:      
-  - { id: 0, type: spill-slot, offset: -16, size: 8, alignment: 16, stack-id: 0, 
+  - { id: 0, type: spill-slot, offset: -16, size: 8, alignment: 16, stack-id: default, 
       callee-saved-register: '$r14d', callee-saved-restored: true, debug-info-variable: '', 
       debug-info-expression: '', debug-info-location: '' }
 stack:           
   - { id: 0, name: local1, type: default, offset: -20, size: 4, alignment: 4, 
-      stack-id: 0, callee-saved-register: '', callee-saved-restored: true, 
+      stack-id: default, callee-saved-register: '', callee-saved-restored: true, 
       debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
 body:             |
   bb.0.entry:

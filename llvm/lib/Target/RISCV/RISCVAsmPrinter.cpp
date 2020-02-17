@@ -16,6 +16,7 @@
 #include "MCTargetDesc/RISCVMCExpr.h"
 #include "RISCVTargetMachine.h"
 #include "TargetInfo/RISCVTargetInfo.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -30,6 +31,9 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
+
+STATISTIC(RISCVNumInstrsCompressed,
+          "Number of RISC-V Compressed instructions emitted");
 
 namespace {
 class RISCVAsmPrinter : public AsmPrinter {
@@ -64,6 +68,8 @@ void RISCVAsmPrinter::EmitToStreamer(MCStreamer &S, const MCInst &Inst) {
   MCInst CInst;
   bool Res = compressInst(CInst, Inst, *TM.getMCSubtargetInfo(),
                           OutStreamer->getContext());
+  if (Res)
+    ++RISCVNumInstrsCompressed;
   AsmPrinter::EmitToStreamer(*OutStreamer, Res ? CInst : Inst);
 }
 
@@ -87,18 +93,44 @@ bool RISCVAsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
   if (!AsmPrinter::PrintAsmOperand(MI, OpNo, ExtraCode, OS))
     return false;
 
-  if (!ExtraCode) {
-    const MachineOperand &MO = MI->getOperand(OpNo);
-    switch (MO.getType()) {
-    case MachineOperand::MO_Immediate:
-      OS << MO.getImm();
-      return false;
-    case MachineOperand::MO_Register:
-      OS << RISCVInstPrinter::getRegisterName(MO.getReg());
-      return false;
+  const MachineOperand &MO = MI->getOperand(OpNo);
+  if (ExtraCode && ExtraCode[0]) {
+    if (ExtraCode[1] != 0)
+      return true; // Unknown modifier.
+
+    switch (ExtraCode[0]) {
     default:
+      return true; // Unknown modifier.
+    case 'z':      // Print zero register if zero, regular printing otherwise.
+      if (MO.isImm() && MO.getImm() == 0) {
+        OS << RISCVInstPrinter::getRegisterName(RISCV::X0);
+        return false;
+      }
       break;
+    case 'i': // Literal 'i' if operand is not a register.
+      if (!MO.isReg())
+        OS << 'i';
+      return false;
     }
+  }
+
+  switch (MO.getType()) {
+  case MachineOperand::MO_Immediate:
+    OS << MO.getImm();
+    return false;
+  case MachineOperand::MO_Register:
+    OS << RISCVInstPrinter::getRegisterName(MO.getReg());
+    return false;
+  case MachineOperand::MO_GlobalAddress:
+    PrintSymbolOperand(MO, OS);
+    return false;
+  case MachineOperand::MO_BlockAddress: {
+    MCSymbol *Sym = GetBlockAddressSymbol(MO.getBlockAddress());
+    Sym->print(OS, MAI);
+    return false;
+  }
+  default:
+    break;
   }
 
   return true;
@@ -123,7 +155,7 @@ bool RISCVAsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
 }
 
 // Force static initialization.
-extern "C" void LLVMInitializeRISCVAsmPrinter() {
+extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVAsmPrinter() {
   RegisterAsmPrinter<RISCVAsmPrinter> X(getTheRISCV32Target());
   RegisterAsmPrinter<RISCVAsmPrinter> Y(getTheRISCV64Target());
 }

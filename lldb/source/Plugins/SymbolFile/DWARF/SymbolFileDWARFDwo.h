@@ -12,37 +12,41 @@
 #include "SymbolFileDWARF.h"
 
 class SymbolFileDWARFDwo : public SymbolFileDWARF {
+  /// LLVM RTTI support.
+  static char ID;
+
 public:
+  /// LLVM RTTI support.
+  /// \{
+  bool isA(const void *ClassID) const override {
+    return ClassID == &ID || SymbolFileDWARF::isA(ClassID);
+  }
+  static bool classof(const SymbolFile *obj) { return obj->isA(&ID); }
+  /// \}
+
   SymbolFileDWARFDwo(lldb::ObjectFileSP objfile, DWARFCompileUnit &dwarf_cu);
 
   ~SymbolFileDWARFDwo() override = default;
 
   lldb::CompUnitSP ParseCompileUnit(DWARFCompileUnit &dwarf_cu) override;
 
-  DWARFUnit *GetCompileUnit();
+  DWARFCompileUnit *GetCompileUnit();
 
   DWARFUnit *
   GetDWARFCompileUnit(lldb_private::CompileUnit *comp_unit) override;
 
-  lldb_private::DWARFExpression::LocationListFormat
-  GetLocationListFormat() const override;
-
   size_t GetObjCMethodDIEOffsets(lldb_private::ConstString class_name,
                                  DIEArray &method_die_offsets) override;
 
-  lldb_private::TypeSystem *
+  llvm::Expected<lldb_private::TypeSystem &>
   GetTypeSystemForLanguage(lldb::LanguageType language) override;
 
   DWARFDIE
   GetDIE(const DIERef &die_ref) override;
 
-  std::unique_ptr<SymbolFileDWARFDwo>
-  GetDwoSymbolFileForCompileUnit(DWARFUnit &dwarf_cu,
-                                 const DWARFDebugInfoEntry &cu_die) override {
-    return nullptr;
-  }
-
   DWARFCompileUnit *GetBaseCompileUnit() override { return &m_base_dwarf_cu; }
+
+  llvm::Optional<uint32_t> GetDwoNum() override { return GetID() >> 32; }
 
 protected:
   void LoadSectionData(lldb::SectionType sect_type,
@@ -65,10 +69,12 @@ protected:
       const DWARFDIE &die, lldb_private::ConstString type_name,
       bool must_be_implementation) override;
 
-  SymbolFileDWARF *GetBaseSymbolFile();
+  SymbolFileDWARF &GetBaseSymbolFile();
 
-  lldb::ObjectFileSP m_obj_file_sp;
+  DWARFCompileUnit *ComputeCompileUnit();
+
   DWARFCompileUnit &m_base_dwarf_cu;
+  DWARFCompileUnit *m_cu = nullptr;
 };
 
 #endif // SymbolFileDWARFDwo_SymbolFileDWARFDwo_h_

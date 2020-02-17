@@ -35,30 +35,20 @@ if (libcxx_needs_site_config) {
       "$target_gen_dir/__config_site",
       "__config",
     ]
-    outputs = [
-      "$target_gen_dir/__config",
-    ]
+    outputs = [ "$target_gen_dir/__config" ]
     args = [
       "$target_gen_dir/__config_site",
       "__config",
       "-o",
       "$target_gen_dir/__config",
     ]
-    deps = [
-      ":write_config",
-    ]
+    deps = [ ":write_config" ]
   }
 
   copy("copy_config") {
-    sources = [
-      "$target_gen_dir/__config",
-    ]
-    outputs = [
-      "$clang_resource_dir/include/c++/v1/{{source_file_part}}",
-    ]
-    deps = [
-      ":concat_config",
-    ]
+    sources = [ "$target_gen_dir/__config" ]
+    outputs = [ "$clang_resource_dir/include/c++/v1/{{source_file_part}}" ]
+    deps = [ ":concat_config" ]
   }
 }
 
@@ -130,8 +120,6 @@ copy("include") {
     "experimental/__config",
     "experimental/__memory",
     "experimental/algorithm",
-    "experimental/any",
-    "experimental/chrono",
     "experimental/coroutine",
     "experimental/deque",
     "experimental/filesystem",
@@ -141,17 +129,11 @@ copy("include") {
     "experimental/list",
     "experimental/map",
     "experimental/memory_resource",
-    "experimental/numeric",
-    "experimental/optional",
     "experimental/propagate_const",
-    "experimental/ratio",
     "experimental/regex",
     "experimental/set",
     "experimental/simd",
     "experimental/string",
-    "experimental/string_view",
-    "experimental/system_error",
-    "experimental/tuple",
     "experimental/type_traits",
     "experimental/unordered_map",
     "experimental/unordered_set",
@@ -228,9 +210,7 @@ copy("include") {
     "wchar.h",
     "wctype.h",
   ]
-  deps = [
-    "//libcxxabi/include",
-  ]
+  deps = [ "//libcxxabi/include" ]
   if (!libcxx_needs_site_config) {
     sources += [ "__config" ]
   } else {
@@ -260,7 +240,5 @@ copy("include") {
       ]
     }
   }
-  outputs = [
-    "$clang_resource_dir/include/c++/v1/{{source_target_relative}}",
-  ]
+  outputs = [ "$root_build_dir/include/c++/v1/{{source_target_relative}}" ]
 }

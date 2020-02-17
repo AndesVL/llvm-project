@@ -106,9 +106,10 @@ void MCELFStreamer::EmitLabel(MCSymbol *S, SMLoc Loc) {
     Symbol->setType(ELF::STT_TLS);
 }
 
-void MCELFStreamer::EmitLabel(MCSymbol *S, SMLoc Loc, MCFragment *F) {
+void MCELFStreamer::EmitLabelAtPos(MCSymbol *S, SMLoc Loc, MCFragment *F,
+                                   uint64_t Offset) {
   auto *Symbol = cast<MCSymbolELF>(S);
-  MCObjectStreamer::EmitLabel(Symbol, Loc, F);
+  MCObjectStreamer::EmitLabelAtPos(Symbol, Loc, F, Offset);
 
   const MCSectionELF &Section =
       static_cast<const MCSectionELF &>(*getCurrentSectionOnly());
@@ -139,7 +140,7 @@ static void setSectionAlignmentForBundling(const MCAssembler &Assembler,
                                            MCSection *Section) {
   if (Section && Assembler.isBundlingEnabled() && Section->hasInstructions() &&
       Section->getAlignment() < Assembler.getBundleAlignSize())
-    Section->setAlignment(Assembler.getBundleAlignSize());
+    Section->setAlignment(Align(Assembler.getBundleAlignSize()));
 }
 
 void MCELFStreamer::ChangeSection(MCSection *Section,
@@ -277,6 +278,9 @@ bool MCELFStreamer::EmitSymbolAttribute(MCSymbol *S, MCSymbolAttr Attribute) {
 
   case MCSA_AltEntry:
     llvm_unreachable("ELF doesn't support the .alt_entry attribute");
+
+  case MCSA_LGlobal:
+    llvm_unreachable("ELF doesn't support the .lglobl attribute");
   }
 
   return true;
@@ -303,15 +307,11 @@ void MCELFStreamer::EmitCommonSymbol(MCSymbol *S, uint64_t Size,
 
     EmitValueToAlignment(ByteAlignment, 0, 1, 0);
     EmitLabel(Symbol);
-    EmitZeros(Size + static_cast<unsigned>(TailPadding));
-
-    // Update the maximum alignment of the section if necessary.
-    if (ByteAlignment > Section.getAlignment())
-      Section.setAlignment(ByteAlignment);
+    EmitZeros(Size + static_cast<uint64_t>(TailPadding));
 
     SwitchSection(P.first, P.second);
   } else {
-    if (Symbol->declareCommon(Size + static_cast<unsigned>(TailPadding),
+    if (Symbol->declareCommon(Size + static_cast<uint64_t>(TailPadding),
                               ByteAlignment))
       report_fatal_error("Symbol: " + Symbol->getName() +
                          " redeclared as different type");

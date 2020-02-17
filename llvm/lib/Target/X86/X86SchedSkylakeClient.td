@@ -226,8 +226,12 @@ defm : X86WriteRes<WriteFStoreY,       [SKLPort237,SKLPort4], 1, [1,1], 2>;
 defm : X86WriteRes<WriteFStoreNT,      [SKLPort237,SKLPort4], 1, [1,1], 2>;
 defm : X86WriteRes<WriteFStoreNTX,     [SKLPort237,SKLPort4], 1, [1,1], 2>;
 defm : X86WriteRes<WriteFStoreNTY,     [SKLPort237,SKLPort4], 1, [1,1], 2>;
-defm : X86WriteRes<WriteFMaskedStore,  [SKLPort237,SKLPort0], 2, [1,1], 2>;
-defm : X86WriteRes<WriteFMaskedStoreY, [SKLPort237,SKLPort0], 2, [1,1], 2>;
+
+defm : X86WriteRes<WriteFMaskedStore32,  [SKLPort237,SKLPort0], 2, [1,1], 2>;
+defm : X86WriteRes<WriteFMaskedStore32Y, [SKLPort237,SKLPort0], 2, [1,1], 2>;
+defm : X86WriteRes<WriteFMaskedStore64,  [SKLPort237,SKLPort0], 2, [1,1], 2>;
+defm : X86WriteRes<WriteFMaskedStore64Y, [SKLPort237,SKLPort0], 2, [1,1], 2>;
+
 defm : X86WriteRes<WriteFMove,         [SKLPort015], 1, [1], 1>;
 defm : X86WriteRes<WriteFMoveX,        [SKLPort015], 1, [1], 1>;
 defm : X86WriteRes<WriteFMoveY,        [SKLPort015], 1, [1], 1>;
@@ -251,7 +255,8 @@ defm : SKLWriteResPair<WriteFCmp64X,  [SKLPort01],  4, [1], 1, 6>;
 defm : SKLWriteResPair<WriteFCmp64Y,  [SKLPort01],  4, [1], 1, 7>;
 defm : X86WriteResPairUnsupported<WriteFCmp64Z>;
 
-defm : SKLWriteResPair<WriteFCom,      [SKLPort0],  2>; // Floating point compare to flags.
+defm : SKLWriteResPair<WriteFCom,      [SKLPort0],  2>; // Floating point compare to flags (X87).
+defm : SKLWriteResPair<WriteFComX,     [SKLPort0],  2>; // Floating point compare to flags (SSE).
 
 defm : SKLWriteResPair<WriteFMul,     [SKLPort01],  4, [1], 1, 5>; // Floating point multiplication.
 defm : SKLWriteResPair<WriteFMulX,    [SKLPort01],  4, [1], 1, 6>;

@@ -180,6 +180,10 @@ class Register<string n, list<string> altNames = []> {
   bits<16> HWEncoding = 0;
 
   bit isArtificial = 0;
+
+  // isConstant - This register always holds a constant value (e.g. the zero
+  // register in architectures such as MIPS)
+  bit isConstant = 0;
 }
 
 // RegisterWithSubRegs - This can be used to define instances of Register which
@@ -351,7 +355,11 @@ def interleave;
 // RegisterTuples instances can be used in other set operations to form
 // register classes and so on. This is the only way of using the generated
 // registers.
-class RegisterTuples<list<SubRegIndex> Indices, list<dag> Regs> {
+//
+// RegNames may be specified to supply asm names for the generated tuples.
+// If used must have the same size as the list of produced registers.
+class RegisterTuples<list<SubRegIndex> Indices, list<dag> Regs,
+                     list<string> RegNames = []> {
   // SubRegs - N lists of registers to be zipped up. Super-registers are
   // synthesized from the first element of each SubRegs list, the second
   // element and so on.
@@ -360,6 +368,9 @@ class RegisterTuples<list<SubRegIndex> Indices, list<dag> Regs> {
   // SubRegIndices - N SubRegIndex instances. This provides the names of the
   // sub-registers in the synthesized super-registers.
   list<SubRegIndex> SubRegIndices = Indices;
+
+  // List of asm names for the generated tuple registers.
+  list<string> RegAsmNames = RegNames;
 }
 
 
@@ -398,16 +409,67 @@ include "llvm/Target/TargetSchedule.td"
 
 class Predicate; // Forward def
 
+class InstructionEncoding {
+  // Size of encoded instruction.
+  int Size;
+
+  // The "namespace" in which this instruction exists, on targets like ARM
+  // which multiple ISA namespaces exist.
+  string DecoderNamespace = "";
+
+  // List of predicates which will be turned into isel matching code.
+  list<Predicate> Predicates = [];
+
+  string DecoderMethod = "";
+
+  // Is the instruction decoder method able to completely determine if the
+  // given instruction is valid or not. If the TableGen definition of the
+  // instruction specifies bitpattern A??B where A and B are static bits, the
+  // hasCompleteDecoder flag says whether the decoder method fully handles the
+  // ?? space, i.e. if it is a final arbiter for the instruction validity.
+  // If not then the decoder attempts to continue decoding when the decoder
+  // method fails.
+  //
+  // This allows to handle situations where the encoding is not fully
+  // orthogonal. Example:
+  // * InstA with bitpattern 0b0000????,
+  // * InstB with bitpattern 0b000000?? but the associated decoder method
+  //   DecodeInstB() returns Fail when ?? is 0b00 or 0b11.
+  //
+  // The decoder tries to decode a bitpattern that matches both InstA and
+  // InstB bitpatterns first as InstB (because it is the most specific
+  // encoding). In the default case (hasCompleteDecoder = 1), when
+  // DecodeInstB() returns Fail the bitpattern gets rejected. By setting
+  // hasCompleteDecoder = 0 in InstB, the decoder is informed that
+  // DecodeInstB() is not able to determine if all possible values of ?? are
+  // valid or not. If DecodeInstB() returns Fail the decoder will attempt to
+  // decode the bitpattern as InstA too.
+  bit hasCompleteDecoder = 1;
+}
+
+// Allows specifying an InstructionEncoding by HwMode. If an Instruction specifies
+// an EncodingByHwMode, its Inst and Size members are ignored and Ts are used
+// to encode and decode based on HwMode.
+class EncodingByHwMode<list<HwMode> Ms = [], list<InstructionEncoding> Ts = []>
+    : HwModeSelect<Ms> {
+  // The length of this list must be the same as the length of Ms.
+  list<InstructionEncoding> Objects = Ts;
+}
+
 //===----------------------------------------------------------------------===//
 // Instruction set description - These classes correspond to the C++ classes in
 // the Target/TargetInstrInfo.h file.
 //
-class Instruction {
+class Instruction : InstructionEncoding {
   string Namespace = "";
 
   dag OutOperandList;       // An dag containing the MI def operand list.
   dag InOperandList;        // An dag containing the MI use operand list.
   string AsmString = "";    // The .s format to print the instruction with.
+
+  // Allows specifying a canonical InstructionEncoding by HwMode. If non-empty,
+  // the Inst member of this Instruction is ignored.
+  EncodingByHwMode EncodingInfos;
 
   // Pattern - Set to the DAG pattern for this instruction, if we know of one,
   // otherwise, uninitialized.
@@ -427,16 +489,16 @@ class Instruction {
   // from the opcode.
   int Size = 0;
 
-  // DecoderNamespace - The "namespace" in which this instruction exists, on
-  // targets like ARM which multiple ISA namespaces exist.
-  string DecoderNamespace = "";
-
   // Code size, for instruction selection.
   // FIXME: What does this actually mean?
   int CodeSize = 0;
 
   // Added complexity passed onto matching pattern.
   int AddedComplexity  = 0;
+
+  // Indicates if this is a pre-isel opcode that should be
+  // legalized/regbankselected/selected.
+  bit isPreISelOpcode = 0;
 
   // These bits capture information about the high-level semantics of the
   // instruction.
@@ -472,6 +534,7 @@ class Instruction {
   bit hasCtrlDep   = 0;     // Does this instruction r/w ctrl-flow chains?
   bit isNotDuplicable = 0;  // Is it unsafe to duplicate this instruction?
   bit isConvergent = 0;     // Is this instruction convergent?
+  bit isAuthenticated = 0;  // Does this instruction authenticate a pointer?
   bit isAsCheapAsAMove = 0; // As cheap (or cheaper) than a move instruction.
   bit hasExtraSrcRegAllocReq = 0; // Sources have special regalloc requirement?
   bit hasExtraDefRegAllocReq = 0; // Defs have special regalloc requirement?
@@ -532,31 +595,6 @@ class Instruction {
   string DisableEncoding = "";
 
   string PostEncoderMethod = "";
-  string DecoderMethod = "";
-
-  // Is the instruction decoder method able to completely determine if the
-  // given instruction is valid or not. If the TableGen definition of the
-  // instruction specifies bitpattern A??B where A and B are static bits, the
-  // hasCompleteDecoder flag says whether the decoder method fully handles the
-  // ?? space, i.e. if it is a final arbiter for the instruction validity.
-  // If not then the decoder attempts to continue decoding when the decoder
-  // method fails.
-  //
-  // This allows to handle situations where the encoding is not fully
-  // orthogonal. Example:
-  // * InstA with bitpattern 0b0000????,
-  // * InstB with bitpattern 0b000000?? but the associated decoder method
-  //   DecodeInstB() returns Fail when ?? is 0b00 or 0b11.
-  //
-  // The decoder tries to decode a bitpattern that matches both InstA and
-  // InstB bitpatterns first as InstB (because it is the most specific
-  // encoding). In the default case (hasCompleteDecoder = 1), when
-  // DecodeInstB() returns Fail the bitpattern gets rejected. By setting
-  // hasCompleteDecoder = 0 in InstB, the decoder is informed that
-  // DecodeInstB() is not able to determine if all possible values of ?? are
-  // valid or not. If DecodeInstB() returns Fail the decoder will attempt to
-  // decode the bitpattern as InstA too.
-  bit hasCompleteDecoder = 1;
 
   /// Target-specific flags. This becomes the TSFlags field in TargetInstrDesc.
   bits<64> TSFlags = 0;
@@ -591,6 +629,13 @@ class Instruction {
   /// instruction selection predicates. FastISel cannot handle such cases, but
   /// SelectionDAG can.
   bit FastISelShouldIgnore = 0;
+}
+
+/// Defines an additional encoding that disassembles to the given instruction
+/// Like Instruction, the Inst and SoftFail fields are omitted to allow targets
+// to specify their size.
+class AdditionalEncoding<Instruction I> : InstructionEncoding {
+  Instruction AliasOf = I;
 }
 
 /// PseudoInstExpansion - Expansion information for a pseudo-instruction.
@@ -818,6 +863,7 @@ def f64imm : Operand<f64>;
 class TypedOperand<string Ty> : Operand<untyped> {
   let OperandType = Ty;
   bit IsPointer = 0;
+  bit IsImmediate = 0;
 }
 
 def type0 : TypedOperand<"OPERAND_GENERIC_0">;
@@ -834,6 +880,12 @@ let IsPointer = 1 in {
   def ptype3 : TypedOperand<"OPERAND_GENERIC_3">;
   def ptype4 : TypedOperand<"OPERAND_GENERIC_4">;
   def ptype5 : TypedOperand<"OPERAND_GENERIC_5">;
+}
+
+// untyped_imm is for operands where isImm() will be true. It currently has no
+// special behaviour and is only used for clarity.
+def untyped_imm_0 : TypedOperand<"OPERAND_GENERIC_IMM_0"> {
+  let IsImmediate = 1;
 }
 
 /// zero_reg definition - Special node to stand for the zero register.
@@ -1054,7 +1106,7 @@ def BUNDLE : StandardPseudoInstruction {
   let OutOperandList = (outs);
   let InOperandList = (ins variable_ops);
   let AsmString = "BUNDLE";
-  let hasSideEffects = 1;
+  let hasSideEffects = 0;
 }
 def LIFETIME_START : StandardPseudoInstruction {
   let OutOperandList = (outs);
@@ -1134,7 +1186,7 @@ def PATCHABLE_FUNCTION_ENTER : StandardPseudoInstruction {
   let InOperandList = (ins);
   let AsmString = "# XRay Function Enter.";
   let usesCustomInserter = 1;
-  let hasSideEffects = 0;
+  let hasSideEffects = 1;
 }
 def PATCHABLE_RET : StandardPseudoInstruction {
   let OutOperandList = (outs);
@@ -1150,7 +1202,7 @@ def PATCHABLE_FUNCTION_EXIT : StandardPseudoInstruction {
   let InOperandList = (ins);
   let AsmString = "# XRay Function Exit.";
   let usesCustomInserter = 1;
-  let hasSideEffects = 0; // FIXME: is this correct?
+  let hasSideEffects = 1;
   let isReturn = 0; // Original return instruction will follow
 }
 def PATCHABLE_TAIL_CALL : StandardPseudoInstruction {
@@ -1163,7 +1215,7 @@ def PATCHABLE_TAIL_CALL : StandardPseudoInstruction {
 }
 def PATCHABLE_EVENT_CALL : StandardPseudoInstruction {
   let OutOperandList = (outs);
-  let InOperandList = (ins ptr_rc:$event, i8imm:$size);
+  let InOperandList = (ins ptr_rc:$event, unknown:$size);
   let AsmString = "# XRay Custom Event Log.";
   let usesCustomInserter = 1;
   let isCall = 1;
@@ -1173,7 +1225,7 @@ def PATCHABLE_EVENT_CALL : StandardPseudoInstruction {
 }
 def PATCHABLE_TYPED_EVENT_CALL : StandardPseudoInstruction {
   let OutOperandList = (outs);
-  let InOperandList = (ins i16imm:$type, ptr_rc:$event, i32imm:$size);
+  let InOperandList = (ins unknown:$type, ptr_rc:$event, unknown:$size);
   let AsmString = "# XRay Typed Event Log.";
   let usesCustomInserter = 1;
   let isCall = 1;
@@ -1191,7 +1243,7 @@ def FENTRY_CALL : StandardPseudoInstruction {
   let hasSideEffects = 1;
 }
 def ICALL_BRANCH_FUNNEL : StandardPseudoInstruction {
-  let OutOperandList = (outs unknown:$dst);
+  let OutOperandList = (outs);
   let InOperandList = (ins variable_ops);
   let AsmString = "";
   let hasSideEffects = 1;
@@ -1245,7 +1297,7 @@ class AsmParser {
   // ReportMultipleNearMisses -
   // When 0, the assembly matcher reports an error for one encoding or operand
   // that did not match the parsed instruction.
-  // When 1, the assmebly matcher returns a list of encodings that were close
+  // When 1, the assembly matcher returns a list of encodings that were close
   // to matching the parsed instruction, so to allow more detailed error
   // messages.
   bit ReportMultipleNearMisses = 0;

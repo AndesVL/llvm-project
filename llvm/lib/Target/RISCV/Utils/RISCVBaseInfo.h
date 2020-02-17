@@ -13,9 +13,11 @@
 #ifndef LLVM_LIB_TARGET_RISCV_MCTARGETDESC_RISCVBASEINFO_H
 #define LLVM_LIB_TARGET_RISCV_MCTARGETDESC_RISCVBASEINFO_H
 
+#include "RISCVRegisterInfo.h"
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/MC/MCInstrDesc.h"
 #include "llvm/MC/SubtargetFeature.h"
 
 namespace llvm {
@@ -46,16 +48,47 @@ enum {
   InstFormatMask = 31
 };
 
+// RISC-V Specific Machine Operand Flags
 enum {
-  MO_None,
-  MO_CALL,
-  MO_LO,
-  MO_HI,
-  MO_PCREL_LO,
-  MO_PCREL_HI,
-  MO_GOT_HI,
+  MO_None = 0,
+  MO_CALL = 1,
+  MO_PLT = 2,
+  MO_LO = 3,
+  MO_HI = 4,
+  MO_PCREL_LO = 5,
+  MO_PCREL_HI = 6,
+  MO_GOT_HI = 7,
+  MO_TPREL_LO = 8,
+  MO_TPREL_HI = 9,
+  MO_TPREL_ADD = 10,
+  MO_TLS_GOT_HI = 11,
+  MO_TLS_GD_HI = 12,
+  MO_CAPTAB_PCREL_HI = 13,
+  MO_TPREL_CINCOFFSET = 14,
+  MO_TLS_IE_CAPTAB_PCREL_HI = 15,
+  MO_TLS_GD_CAPTAB_PCREL_HI = 16,
+
+  // Used to differentiate between target-specific "direct" flags and "bitmask"
+  // flags. A machine operand can only have one "direct" flag, but can have
+  // multiple "bitmask" flags.
+  MO_DIRECT_FLAG_MASK = 31
 };
 } // namespace RISCVII
+
+namespace RISCVOp {
+enum OperandType : unsigned {
+  OPERAND_FIRST_RISCV_IMM = MCOI::OPERAND_FIRST_TARGET,
+  OPERAND_UIMM4 = OPERAND_FIRST_RISCV_IMM,
+  OPERAND_UIMM5,
+  OPERAND_UIMM12,
+  OPERAND_SIMM12,
+  OPERAND_SIMM13_LSB0,
+  OPERAND_UIMM20,
+  OPERAND_SIMM21_LSB0,
+  OPERAND_UIMMLOG2XLEN,
+  OPERAND_LAST_RISCV_IMM = OPERAND_UIMMLOG2XLEN
+};
+} // namespace RISCVOp
 
 // Describes the predecessor/successor bits used in the FENCE instruction.
 namespace RISCVFenceField {
@@ -155,6 +188,16 @@ struct SysReg {
 #include "RISCVGenSystemOperands.inc"
 } // end namespace RISCVSysReg
 
+namespace RISCVSpecialCapReg {
+struct SpecialCapReg {
+  const char *Name;
+  unsigned Encoding;
+};
+
+#define GET_SpecialCapRegsList_DECL
+#include "RISCVGenSystemOperands.inc"
+} // end namespace RISCVSpecialCapReg
+
 namespace RISCVABI {
 
 enum ABI {
@@ -162,9 +205,16 @@ enum ABI {
   ABI_ILP32F,
   ABI_ILP32D,
   ABI_ILP32E,
+  ABI_IL32PC64,
+  ABI_IL32PC64F,
+  ABI_IL32PC64D,
+  ABI_IL32PC64E,
   ABI_LP64,
   ABI_LP64F,
   ABI_LP64D,
+  ABI_L64PC128,
+  ABI_L64PC128F,
+  ABI_L64PC128D,
   ABI_Unknown
 };
 
@@ -173,6 +223,31 @@ enum ABI {
 ABI computeTargetABI(const Triple &TT, FeatureBitset FeatureBits,
                      StringRef ABIName);
 
+// Returns the register used to hold the stack pointer after realignment.
+Register getBPReg(ABI TargetABI);
+
+inline static bool isCheriPureCapABI(ABI TargetABI) {
+  switch (TargetABI) {
+  case ABI_ILP32:
+  case ABI_ILP32F:
+  case ABI_ILP32D:
+  case ABI_ILP32E:
+  case ABI_LP64:
+  case ABI_LP64F:
+  case ABI_LP64D:
+    return false;
+  case ABI_IL32PC64:
+  case ABI_IL32PC64F:
+  case ABI_IL32PC64D:
+  case ABI_IL32PC64E:
+  case ABI_L64PC128:
+  case ABI_L64PC128F:
+  case ABI_L64PC128D:
+    return true;
+  default:
+    llvm_unreachable("Improperly initialised target ABI");
+  }
+}
 } // namespace RISCVABI
 
 namespace RISCVFeatures {

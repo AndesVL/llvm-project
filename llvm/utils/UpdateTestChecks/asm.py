@@ -39,7 +39,7 @@ ASM_FUNCTION_AMDGPU_RE = re.compile(
     r'^_?(?P<func>[^:]+):[ \t]*;+[ \t]*@(?P=func)\n[^:]*?'
     r'(?P<body>.*?)\n' # (body of the function)
     # This list is incomplete
-    r'.Lfunc_end[0-9]+:\n',
+    r'^\s*(\.Lfunc_end[0-9]+:\n|\.section)',
     flags=(re.M | re.S))
 
 ASM_FUNCTION_HEXAGON_RE = re.compile(
@@ -53,9 +53,16 @@ ASM_FUNCTION_MIPS_RE = re.compile(
     r'^_?(?P<func>[^:]+):[ \t]*#+[ \t]*@(?P=func)\n[^:]*?' # f: (name of func)
     r'(?:^[ \t]+\.(frame|f?mask|set).*?\n)+'  # Mips+LLVM standard asm prologue
     r'(?P<body>.*?)\n'                        # (body of the function)
-    r'(?:^[ \t]+\.(set|end).*?\n)+'           # Mips+LLVM standard asm epilogue
+    # Mips+LLVM standard asm epilogue
+    r'(?:(^[ \t]+\.set[^\n]*?\n)*^[ \t]+\.end.*?\n)'
     r'(\$|\.L)func_end[0-9]+:\n',             # $func_end0: (mips32 - O32) or
                                               # .Lfunc_end0: (mips64 - NewABI)
+    flags=(re.M | re.S))
+
+ASM_FUNCTION_MSP430_RE = re.compile(
+    r'^_?(?P<func>[^:]+):[ \t]*;+[ \t]*@(?P=func)\n[^:]*?'
+    r'(?P<body>.*?)\n'
+    r'(\$|\.L)func_end[0-9]+:\n',             # $func_end0:
     flags=(re.M | re.S))
 
 ASM_FUNCTION_PPC_RE = re.compile(
@@ -71,7 +78,7 @@ ASM_FUNCTION_PPC_RE = re.compile(
     flags=(re.M | re.S))
 
 ASM_FUNCTION_RISCV_RE = re.compile(
-    r'^_?(?P<func>[^:]+):[ \t]*#+[ \t]*@(?P=func)\n[^:]*?'
+    r'^_?(?P<func>[^:]+):[ \t]*#+[ \t]*@(?P=func)\n(?:\s*\.?Lfunc_begin[^:\n]*:\n)?[^:]*?'
     r'(?P<body>^##?[ \t]+[^:]+:.*?)\s*'
     r'.Lfunc_end[0-9]+:\n',
     flags=(re.M | re.S))
@@ -96,10 +103,41 @@ ASM_FUNCTION_SYSTEMZ_RE = re.compile(
     r'.Lfunc_end[0-9]+:\n',
     flags=(re.M | re.S))
 
+ASM_FUNCTION_AARCH64_DARWIN_RE = re.compile(
+     r'^_(?P<func>[^:]+):[ \t]*;[ \t]@(?P=func)\n'
+     r'([ \t]*.cfi_startproc\n[\s]*)?'
+     r'(?P<body>.*?)'
+     r'([ \t]*.cfi_endproc\n[\s]*)?'
+     r'^[ \t]*;[ \t]--[ \t]End[ \t]function',
+     flags=(re.M | re.S))
+
+ASM_FUNCTION_ARM_DARWIN_RE = re.compile(
+     r'^[ \t]*\.globl[ \t]*_(?P<func>[^ \t])[ \t]*@[ \t]--[ \t]Begin[ \t]function[ \t](?P=func)'
+     r'(?P<directives>.*?)'
+     r'^_(?P=func):\n[ \t]*'
+     r'(?P<body>.*?)'
+     r'^[ \t]*@[ \t]--[ \t]End[ \t]function',
+     flags=(re.M | re.S ))
+
+ASM_FUNCTION_ARM_MACHO_RE = re.compile(
+     r'^_(?P<func>[^:]+):[ \t]*\n'
+     r'([ \t]*.cfi_startproc\n[ \t]*)?'
+     r'(?P<body>.*?)\n'
+     r'[ \t]*\.cfi_endproc\n',
+     flags=(re.M | re.S))
+
+ASM_FUNCTION_ARM_IOS_RE = re.compile(
+     r'^_(?P<func>[^:]+):[ \t]*\n'
+     r'^Lfunc_begin(?P<id>[0-9][1-9]*):\n'
+     r'(?P<body>.*?)'
+     r'^Lfunc_end(?P=id):\n'
+     r'^[ \t]*@[ \t]--[ \t]End[ \t]function',
+     flags=(re.M | re.S))
+
 ASM_FUNCTION_WASM32_RE = re.compile(
     r'^_?(?P<func>[^:]+):[ \t]*#+[ \t]*@(?P=func)\n'
     r'(?P<body>.*?)\n'
-    r'.Lfunc_end[0-9]+:\n',
+    r'^\s*(\.Lfunc_end[0-9]+:\n|end_function)',
     flags=(re.M | re.S))
 
 
@@ -184,8 +222,8 @@ def scrub_asm_powerpc(asm, args):
   asm = common.SCRUB_WHITESPACE_RE.sub(r' ', asm)
   # Expand the tabs used for indentation.
   asm = string.expandtabs(asm, 2)
-  # Stripe unimportant comments
-  asm = SCRUB_LOOP_COMMENT_RE.sub(r'', asm)
+  # Stripe unimportant comments, but leave the token '#' in place.
+  asm = SCRUB_LOOP_COMMENT_RE.sub(r'#', asm)
   # Strip trailing whitespace.
   asm = common.SCRUB_TRAILING_WHITESPACE_RE.sub(r'', asm)
   return asm
@@ -195,13 +233,33 @@ last_cap_size = None
 last_frame_size = None  # type: int
 
 
-def offset_to_cap_expr(offset, cap_size):
-  if offset == 0:
-    return "0"
-  elif offset % cap_size == 0:
+def cap_size_multiple(offset, cap_size):
+  if offset % cap_size == 0:
     return "[[#CAP_SIZE * " + str(offset // cap_size) + "]]"
   else:
     return "[[#CAP_SIZE * " + str(offset // cap_size) + " + " + str(offset % cap_size) + "]]"
+
+
+def offset_to_cap_expr(match, offset, cap_size):
+  if offset == 0:
+    return "0"
+  global last_frame_size
+  if not last_frame_size:
+    print("clc/csc: unknown stackframe size:" + unchanged_match(match))
+    return cap_size_multiple(offset, cap_size)
+
+  if offset >= last_frame_size:
+    print("clc/csc: offset bigger than", last_frame_size, ":" + unchanged_match(match))
+    return cap_size_multiple(offset, cap_size)
+
+  difference = last_frame_size - offset
+  if difference % cap_size != 0:
+    print("clc/csc: modulo wrong:" + unchanged_match(match))
+    return cap_size_multiple(offset, cap_size)
+
+  if difference == cap_size:
+    return "[[#STACKFRAME_SIZE - CAP_SIZE]]"
+  return "[[#STACKFRAME_SIZE - (" + str(difference // cap_size) + " * CAP_SIZE)]]"
 
 
 def unchanged_match(match):
@@ -220,7 +278,7 @@ def do_clc_csc_sub(match):
     offset_sign = ""
   cap_size = int(match.group('cap_size'))
   assert cap_size == 16 or cap_size == 32
-  offset_str = offset_to_cap_expr(offset, cap_size)
+  offset_str = offset_to_cap_expr(match, offset, cap_size)
   global last_cap_size
   last_cap_size = cap_size
   result = insn + " " + reg + ", $zero, " + offset_sign + offset_str + "($c11)"
@@ -257,7 +315,7 @@ def do_save_load_dword_sub(match):
 
 def do_cfi_offset_sub(match):
   cap_size = 16 if last_cap_size is None else last_cap_size
-  offset_str = offset_to_cap_expr(int(match.group('offset')), cap_size)
+  offset_str = offset_to_cap_expr(match, int(match.group('offset')), cap_size)
   return ".cfi_offset " + match.group('reg') + ", -" + offset_str
 
 
@@ -296,9 +354,6 @@ def scrub_asm_mips(asm, args):
   global last_frame_size
   last_frame_size = None
 
-  # Expand .cfi offsets and clc offset to @EXPR for CHERI128/256
-  stack_store_cap_re = re.compile(r'(?P<insn>csc|clc) (?P<reg>\$\w+), \$zero, (?P<offset_sign>\-)?(?P<offset>\d+)\(\$c11\) *# (?P<cap_size>16|32)\-byte Folded (Spill|Reload)')
-  asm = stack_store_cap_re.sub(do_clc_csc_sub, asm)
   stackframe_size_regex = re.compile(r'(?P<instr>cincoffset \$c11, \$c11), -(?P<size>\d+)\n *.cfi_def_cfa_offset (?P<cfa>\d+)')
   asm = stackframe_size_regex.sub(do_stackframe_size_sub, asm, count=1)
   if not last_frame_size:
@@ -311,6 +366,9 @@ def scrub_asm_mips(asm, args):
     mips_stackframe_size_fallback_regex = re.compile(r'(?P<instr>daddiu \$sp, \$sp), -(?P<size>\d+)\n')
     asm = mips_stackframe_size_fallback_regex.sub(do_stackframe_size_fallback_sub, asm, count=1)
 
+  # Expand .cfi offsets and clc offset to #CAPS_SIZE for CHERI128/256
+  stack_store_cap_re = re.compile(r'(?P<insn>csc|clc) (?P<reg>\$\w+), \$zero, (?P<offset_sign>\-)?(?P<offset>\d+)\(\$c11\) *# (?P<cap_size>16|32)\-byte Folded (Spill|Reload)')
+  asm = stack_store_cap_re.sub(do_clc_csc_sub, asm)
   stack_store_dword_re = re.compile(r'(?P<insn>csd|cld) (?P<reg>\$\w+), \$zero, (?P<offset_sign>\-)?(?P<offset>\d+)\(\$c11\) *# 8\-byte Folded (Spill|Reload)')
   asm = stack_store_dword_re.sub(do_save_load_dword_sub, asm)
   cfi_offset_regex = re.compile(r'\.cfi_offset (?P<reg>[$\w]+), -(?P<offset>\d+)')
@@ -321,6 +379,16 @@ def scrub_asm_mips(asm, args):
   if last_frame_size:
     asm = re.sub("cincoffset\s+\$c11,\s+\$c11, " + str(last_frame_size), "cincoffset $c11, $c11, [[#STACKFRAME_SIZE]]", asm)
     asm = re.sub("daddiu\s+\$sp,\s+\$sp, " + str(last_frame_size), "daddiu $sp, $sp, [[#STACKFRAME_SIZE]]", asm)
+  return asm
+
+def scrub_asm_msp430(asm, args):
+  # Scrub runs of whitespace out of the assembly, but leave the leading
+  # whitespace in place.
+  asm = common.SCRUB_WHITESPACE_RE.sub(r' ', asm)
+  # Expand the tabs used for indentation.
+  asm = string.expandtabs(asm, 2)
+  # Strip trailing whitespace.
+  asm = common.SCRUB_TRAILING_WHITESPACE_RE.sub(r'', asm)
   return asm
 
 def scrub_asm_riscv(asm, args):
@@ -389,66 +457,53 @@ def get_triple_from_march(march):
 
 def build_function_body_dictionary_for_triple(args, raw_tool_output, triple, prefixes, func_dict):
   target_handlers = {
-      'x86_64': (scrub_asm_x86, ASM_FUNCTION_X86_RE),
       'i686': (scrub_asm_x86, ASM_FUNCTION_X86_RE),
       'x86': (scrub_asm_x86, ASM_FUNCTION_X86_RE),
       'i386': (scrub_asm_x86, ASM_FUNCTION_X86_RE),
-      'arm64-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_AARCH64_RE),
       'aarch64': (scrub_asm_arm_eabi, ASM_FUNCTION_AARCH64_RE),
+      'aarch64-apple-darwin': (scrub_asm_arm_eabi, ASM_FUNCTION_AARCH64_DARWIN_RE),
       'hexagon': (scrub_asm_hexagon, ASM_FUNCTION_HEXAGON_RE),
       'r600': (scrub_asm_amdgpu, ASM_FUNCTION_AMDGPU_RE),
       'amdgcn': (scrub_asm_amdgpu, ASM_FUNCTION_AMDGPU_RE),
-      'arm-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumb-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv6': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv6-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv6t2': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv6t2-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv6m': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv6m-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv7': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv7-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv7m': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv7m-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv8-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv8m.base': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'thumbv8m.main': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'armv6': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'armv7': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'armv7-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'armeb-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'armv7eb-eabi': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'armv7eb': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
-      'armv8a': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
+      'arm': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
+      'arm64': (scrub_asm_arm_eabi, ASM_FUNCTION_AARCH64_RE),
+      'arm64-apple-ios': (scrub_asm_arm_eabi, ASM_FUNCTION_AARCH64_DARWIN_RE),
+      'armv7-apple-ios' : (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_IOS_RE),
+      'armv7-apple-darwin': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_DARWIN_RE),
+      'thumb': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_RE),
+      'thumb-macho': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_MACHO_RE),
+      'thumbv5-macho': (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_MACHO_RE),
+      'thumbv7-apple-ios' : (scrub_asm_arm_eabi, ASM_FUNCTION_ARM_IOS_RE),
       'mips': (scrub_asm_mips, ASM_FUNCTION_MIPS_RE),
       'cheri': (scrub_asm_mips, ASM_FUNCTION_MIPS_RE),
+      'msp430': (scrub_asm_msp430, ASM_FUNCTION_MSP430_RE),
       'ppc32': (scrub_asm_powerpc, ASM_FUNCTION_PPC_RE),
-      'powerpc64': (scrub_asm_powerpc, ASM_FUNCTION_PPC_RE),
-      'powerpc64le': (scrub_asm_powerpc, ASM_FUNCTION_PPC_RE),
+      'powerpc': (scrub_asm_powerpc, ASM_FUNCTION_PPC_RE),
       'riscv32': (scrub_asm_riscv, ASM_FUNCTION_RISCV_RE),
       'riscv64': (scrub_asm_riscv, ASM_FUNCTION_RISCV_RE),
       'lanai': (scrub_asm_lanai, ASM_FUNCTION_LANAI_RE),
       'sparc': (scrub_asm_sparc, ASM_FUNCTION_SPARC_RE),
-      'sparcv9': (scrub_asm_sparc, ASM_FUNCTION_SPARC_RE),
       's390x': (scrub_asm_systemz, ASM_FUNCTION_SYSTEMZ_RE),
       'wasm32': (scrub_asm_wasm32, ASM_FUNCTION_WASM32_RE),
   }
-  handlers = None
+  handler = None
+  best_prefix = ''
   for prefix, s in target_handlers.items():
-    if triple.startswith(prefix):
-      handlers = s
-      break
-  else:
+    if triple.startswith(prefix) and len(prefix) > len(best_prefix):
+      handler = s
+      best_prefix = prefix
+
+  if handler is None:
     raise KeyError('Triple %r is not supported' % (triple))
 
-  scrubber, function_re = handlers
+  scrubber, function_re = handler
   common.build_function_body_dictionary(
           function_re, scrubber, [args], raw_tool_output, prefixes,
-          func_dict, args.verbose)
+          func_dict, args.verbose, False)
 
 ##### Generator of assembly CHECK lines
 
 def add_asm_checks(output_lines, comment_marker, prefix_list, func_dict, func_name):
   # Label format is based on ASM string.
-  check_label_format = '{} %s-LABEL: %s:'.format(comment_marker)
+  check_label_format = '{} %s-LABEL: %s%s:'.format(comment_marker)
   common.add_checks(output_lines, comment_marker, prefix_list, func_dict, func_name, check_label_format, True, False)

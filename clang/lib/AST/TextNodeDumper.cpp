@@ -255,9 +255,12 @@ void TextNodeDumper::Visit(const Decl *D) {
 
   if (D->isInvalidDecl())
     OS << " invalid";
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
-    if (FD->isConstexpr())
+  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+    if (FD->isConstexprSpecified())
       OS << " constexpr";
+    if (FD->isConsteval())
+      OS << " consteval";
+  }
 
   if (!isa<FunctionDecl>(*D)) {
     const auto *MD = dyn_cast<ObjCMethodDecl>(D);
@@ -444,12 +447,6 @@ void TextNodeDumper::dumpAccessSpecifier(AccessSpecifier AS) {
   }
 }
 
-void TextNodeDumper::dumpCXXTemporary(const CXXTemporary *Temporary) {
-  OS << "(CXXTemporary";
-  dumpPointer(Temporary);
-  OS << ")";
-}
-
 void TextNodeDumper::dumpDeclRef(const Decl *D, StringRef Label) {
   if (!D)
     return;
@@ -491,6 +488,9 @@ void TextNodeDumper::visitInlineCommandComment(
     break;
   case comments::InlineCommandComment::RenderEmphasized:
     OS << " RenderEmphasized";
+    break;
+  case comments::InlineCommandComment::RenderAnchor:
+    OS << " RenderAnchor";
     break;
   }
 
@@ -639,8 +639,8 @@ static void dumpBasePath(raw_ostream &OS, const CastExpr *Node) {
     if (!First)
       OS << " -> ";
 
-    const CXXRecordDecl *RD =
-        cast<CXXRecordDecl>(Base->getType()->getAs<RecordType>()->getDecl());
+    const auto *RD =
+        cast<CXXRecordDecl>(Base->getType()->castAs<RecordType>()->getDecl());
 
     if (Base->isVirtual())
       OS << "virtual ";
@@ -684,6 +684,14 @@ void TextNodeDumper::VisitGotoStmt(const GotoStmt *Node) {
 void TextNodeDumper::VisitCaseStmt(const CaseStmt *Node) {
   if (Node->caseStmtIsGNURange())
     OS << " gnu_range";
+}
+
+void TextNodeDumper::VisitConstantExpr(const ConstantExpr *Node) {
+  if (Node->getResultAPValueKind() != APValue::None) {
+    ColorScope Color(OS, ShowColors, ValueColor);
+    OS << " ";
+    Node->getAPValueResult().dump(OS);
+  }
 }
 
 void TextNodeDumper::VisitCallExpr(const CallExpr *Node) {
@@ -902,8 +910,9 @@ void TextNodeDumper::VisitCXXConstructExpr(const CXXConstructExpr *Node) {
 
 void TextNodeDumper::VisitCXXBindTemporaryExpr(
     const CXXBindTemporaryExpr *Node) {
-  OS << " ";
-  dumpCXXTemporary(Node->getTemporary());
+  OS << " (CXXTemporary";
+  dumpPointer(Node);
+  OS << ")";
 }
 
 void TextNodeDumper::VisitCXXNewExpr(const CXXNewExpr *Node) {
@@ -1332,6 +1341,17 @@ void TextNodeDumper::VisitFunctionDecl(const FunctionDecl *D) {
     OS << " <<<NULL params x " << D->getNumParams() << ">>>";
 }
 
+void TextNodeDumper::VisitLifetimeExtendedTemporaryDecl(
+    const LifetimeExtendedTemporaryDecl *D) {
+  OS << " extended by ";
+  dumpBareDeclRef(D->getExtendingDecl());
+  OS << " mangling ";
+  {
+    ColorScope Color(OS, ShowColors, ValueColor);
+    OS << D->getManglingNumber();
+  }
+}
+
 void TextNodeDumper::VisitFieldDecl(const FieldDecl *D) {
   dumpName(D);
   dumpType(D->getType());
@@ -1378,6 +1398,8 @@ void TextNodeDumper::VisitVarDecl(const VarDecl *D) {
       break;
     }
   }
+  if (D->needsDestruction(D->getASTContext()))
+    OS << " destroyed";
   if (D->isParameterPack())
     OS << " pack";
 }
@@ -1530,6 +1552,7 @@ void TextNodeDumper::VisitCXXRecordDecl(const CXXRecordDecl *D) {
     FLAG(isGenericLambda, generic);
     FLAG(isLambda, lambda);
 
+    FLAG(isAnonymousStructOrUnion, is_anonymous);
     FLAG(canPassInRegisters, pass_in_registers);
     FLAG(isEmpty, empty);
     FLAG(isAggregate, aggregate);
@@ -1634,6 +1657,7 @@ void TextNodeDumper::VisitCXXRecordDecl(const CXXRecordDecl *D) {
       FLAG(hasTrivialDestructor, trivial);
       FLAG(hasNonTrivialDestructor, non_trivial);
       FLAG(hasUserDeclaredDestructor, user_declared);
+      FLAG(hasConstexprDestructor, constexpr);
       FLAG(needsImplicitDestructor, needs_implicit);
       FLAG(needsOverloadResolutionForDestructor, needs_overload_resolution);
       if (!D->needsOverloadResolutionForDestructor())
@@ -1670,7 +1694,16 @@ void TextNodeDumper::VisitBuiltinTemplateDecl(const BuiltinTemplateDecl *D) {
 }
 
 void TextNodeDumper::VisitTemplateTypeParmDecl(const TemplateTypeParmDecl *D) {
-  if (D->wasDeclaredWithTypename())
+  if (const auto *TC = D->getTypeConstraint()) {
+    OS << " ";
+    dumpBareDeclRef(TC->getNamedConcept());
+    if (TC->getNamedConcept() != TC->getFoundDecl()) {
+      OS << " (";
+      dumpBareDeclRef(TC->getFoundDecl());
+      OS << ")";
+    }
+    Visit(TC->getImmediatelyDeclaredConstraint());
+  } else if (D->wasDeclaredWithTypename())
     OS << " typename";
   else
     OS << " class";
@@ -1905,6 +1938,8 @@ void TextNodeDumper::VisitObjCPropertyDecl(const ObjCPropertyDecl *D) {
       OS << " unsafe_unretained";
     if (Attrs & ObjCPropertyDecl::OBJC_PR_class)
       OS << " class";
+    if (Attrs & ObjCPropertyDecl::OBJC_PR_direct)
+      OS << " direct";
     if (Attrs & ObjCPropertyDecl::OBJC_PR_getter)
       dumpDeclRef(D->getGetterMethodDecl(), "getter");
     if (Attrs & ObjCPropertyDecl::OBJC_PR_setter)
@@ -1928,4 +1963,8 @@ void TextNodeDumper::VisitBlockDecl(const BlockDecl *D) {
 
   if (D->capturesCXXThis())
     OS << " captures_this";
+}
+
+void TextNodeDumper::VisitConceptDecl(const ConceptDecl *D) {
+  dumpName(D);
 }

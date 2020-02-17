@@ -84,9 +84,20 @@ ARMLegalizerInfo::ARMLegalizerInfo(const ARMSubtarget &ST) {
   getActionDefinitionsBuilder({G_SEXT, G_ZEXT, G_ANYEXT})
       .legalForCartesianProduct({s8, s16, s32}, {s1, s8, s16});
 
-  getActionDefinitionsBuilder({G_ADD, G_SUB, G_MUL, G_AND, G_OR, G_XOR})
+  getActionDefinitionsBuilder(G_SEXT_INREG).lower();
+
+  getActionDefinitionsBuilder({G_MUL, G_AND, G_OR, G_XOR})
       .legalFor({s32})
       .minScalar(0, s32);
+
+  if (ST.hasNEON())
+    getActionDefinitionsBuilder({G_ADD, G_SUB})
+        .legalFor({s32, s64})
+        .minScalar(0, s32);
+  else
+    getActionDefinitionsBuilder({G_ADD, G_SUB})
+        .legalFor({s32})
+        .minScalar(0, s32);
 
   getActionDefinitionsBuilder({G_ASHR, G_LSHR, G_SHL})
     .legalFor({{s32, s32}})
@@ -151,7 +162,7 @@ ARMLegalizerInfo::ARMLegalizerInfo(const ARMSubtarget &ST) {
           .legalFor({s32, p0})
           .minScalar(0, s32);
 
-  getActionDefinitionsBuilder(G_GEP)
+  getActionDefinitionsBuilder(G_PTR_ADD)
       .legalFor({{p0, s32}})
       .minScalar(1, s32);
 
@@ -253,7 +264,7 @@ void ARMLegalizerInfo::setFCmpLibcallsAEABI() {
       {RTLIB::OLE_F32, CmpInst::BAD_ICMP_PREDICATE}};
   FCmp32Libcalls[CmpInst::FCMP_OLT] = {
       {RTLIB::OLT_F32, CmpInst::BAD_ICMP_PREDICATE}};
-  FCmp32Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::O_F32, CmpInst::ICMP_EQ}};
+  FCmp32Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::UO_F32, CmpInst::ICMP_EQ}};
   FCmp32Libcalls[CmpInst::FCMP_UGE] = {{RTLIB::OLT_F32, CmpInst::ICMP_EQ}};
   FCmp32Libcalls[CmpInst::FCMP_UGT] = {{RTLIB::OLE_F32, CmpInst::ICMP_EQ}};
   FCmp32Libcalls[CmpInst::FCMP_ULE] = {{RTLIB::OGT_F32, CmpInst::ICMP_EQ}};
@@ -279,7 +290,7 @@ void ARMLegalizerInfo::setFCmpLibcallsAEABI() {
       {RTLIB::OLE_F64, CmpInst::BAD_ICMP_PREDICATE}};
   FCmp64Libcalls[CmpInst::FCMP_OLT] = {
       {RTLIB::OLT_F64, CmpInst::BAD_ICMP_PREDICATE}};
-  FCmp64Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::O_F64, CmpInst::ICMP_EQ}};
+  FCmp64Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::UO_F64, CmpInst::ICMP_EQ}};
   FCmp64Libcalls[CmpInst::FCMP_UGE] = {{RTLIB::OLT_F64, CmpInst::ICMP_EQ}};
   FCmp64Libcalls[CmpInst::FCMP_UGT] = {{RTLIB::OLE_F64, CmpInst::ICMP_EQ}};
   FCmp64Libcalls[CmpInst::FCMP_ULE] = {{RTLIB::OGT_F64, CmpInst::ICMP_EQ}};
@@ -304,7 +315,7 @@ void ARMLegalizerInfo::setFCmpLibcallsGNU() {
   FCmp32Libcalls[CmpInst::FCMP_OGT] = {{RTLIB::OGT_F32, CmpInst::ICMP_SGT}};
   FCmp32Libcalls[CmpInst::FCMP_OLE] = {{RTLIB::OLE_F32, CmpInst::ICMP_SLE}};
   FCmp32Libcalls[CmpInst::FCMP_OLT] = {{RTLIB::OLT_F32, CmpInst::ICMP_SLT}};
-  FCmp32Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::O_F32, CmpInst::ICMP_EQ}};
+  FCmp32Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::UO_F32, CmpInst::ICMP_EQ}};
   FCmp32Libcalls[CmpInst::FCMP_UGE] = {{RTLIB::OLT_F32, CmpInst::ICMP_SGE}};
   FCmp32Libcalls[CmpInst::FCMP_UGT] = {{RTLIB::OLE_F32, CmpInst::ICMP_SGT}};
   FCmp32Libcalls[CmpInst::FCMP_ULE] = {{RTLIB::OGT_F32, CmpInst::ICMP_SLE}};
@@ -322,7 +333,7 @@ void ARMLegalizerInfo::setFCmpLibcallsGNU() {
   FCmp64Libcalls[CmpInst::FCMP_OGT] = {{RTLIB::OGT_F64, CmpInst::ICMP_SGT}};
   FCmp64Libcalls[CmpInst::FCMP_OLE] = {{RTLIB::OLE_F64, CmpInst::ICMP_SLE}};
   FCmp64Libcalls[CmpInst::FCMP_OLT] = {{RTLIB::OLT_F64, CmpInst::ICMP_SLT}};
-  FCmp64Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::O_F64, CmpInst::ICMP_EQ}};
+  FCmp64Libcalls[CmpInst::FCMP_ORD] = {{RTLIB::UO_F64, CmpInst::ICMP_EQ}};
   FCmp64Libcalls[CmpInst::FCMP_UGE] = {{RTLIB::OLT_F64, CmpInst::ICMP_SGE}};
   FCmp64Libcalls[CmpInst::FCMP_UGT] = {{RTLIB::OLE_F64, CmpInst::ICMP_SGT}};
   FCmp64Libcalls[CmpInst::FCMP_ULE] = {{RTLIB::OGT_F64, CmpInst::ICMP_SLE}};
@@ -360,7 +371,7 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
     return false;
   case G_SREM:
   case G_UREM: {
-    unsigned OriginalResult = MI.getOperand(0).getReg();
+    Register OriginalResult = MI.getOperand(0).getReg();
     auto Size = MRI.getType(OriginalResult).getSizeInBits();
     if (Size != 32)
       return false;
@@ -369,24 +380,17 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
         MI.getOpcode() == G_SREM ? RTLIB::SDIVREM_I32 : RTLIB::UDIVREM_I32;
 
     // Our divmod libcalls return a struct containing the quotient and the
-    // remainder. We need to create a virtual register for it.
+    // remainder. Create a new, unused register for the quotient and use the
+    // destination of the original instruction for the remainder.
     Type *ArgTy = Type::getInt32Ty(Ctx);
     StructType *RetTy = StructType::get(Ctx, {ArgTy, ArgTy}, /* Packed */ true);
-    auto RetVal = MRI.createGenericVirtualRegister(
-        getLLTForType(*RetTy, MIRBuilder.getMF().getDataLayout()));
-
-    auto Status = createLibcall(MIRBuilder, Libcall, {RetVal, RetTy},
+    Register RetRegs[] = {MRI.createGenericVirtualRegister(LLT::scalar(32)),
+                          OriginalResult};
+    auto Status = createLibcall(MIRBuilder, Libcall, {RetRegs, RetTy},
                                 {{MI.getOperand(1).getReg(), ArgTy},
                                  {MI.getOperand(2).getReg(), ArgTy}});
     if (Status != LegalizerHelper::Legalized)
       return false;
-
-    // The remainder is the second result of divmod. Split the return value into
-    // a new, unused register for the quotient and the destination of the
-    // original instruction for the remainder.
-    MIRBuilder.buildUnmerge(
-        {MRI.createGenericVirtualRegister(LLT::scalar(32)), OriginalResult},
-        RetVal);
     break;
   }
   case G_FCMP: {
@@ -414,7 +418,7 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
     auto *ArgTy = OpSize == 32 ? Type::getFloatTy(Ctx) : Type::getDoubleTy(Ctx);
     auto *RetTy = Type::getInt32Ty(Ctx);
 
-    SmallVector<unsigned, 2> Results;
+    SmallVector<Register, 2> Results;
     for (auto Libcall : Libcalls) {
       auto LibcallResult = MRI.createGenericVirtualRegister(LLT::scalar(32));
       auto Status =
@@ -458,7 +462,7 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
     // Convert to integer constants, while preserving the binary representation.
     auto AsInteger =
         MI.getOperand(1).getFPImm()->getValueAPF().bitcastToAPInt();
-    MIRBuilder.buildConstant(MI.getOperand(0).getReg(),
+    MIRBuilder.buildConstant(MI.getOperand(0),
                              *ConstantInt::get(Ctx, AsInteger));
     break;
   }

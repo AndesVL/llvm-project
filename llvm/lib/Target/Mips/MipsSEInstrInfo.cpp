@@ -78,8 +78,8 @@ unsigned MipsSEInstrInfo::isStoreToStackSlot(const MachineInstr &MI,
 
 void MipsSEInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
                                   MachineBasicBlock::iterator I,
-                                  const DebugLoc &DL, unsigned DestReg,
-                                  unsigned SrcReg, bool KillSrc) const {
+                                  const DebugLoc &DL, MCRegister DestReg,
+                                  MCRegister SrcReg, bool KillSrc) const {
   unsigned Opc = 0, ZeroReg = 0;
   bool isMicroMips = Subtarget.inMicroMipsMode();
 
@@ -240,31 +240,26 @@ static bool isReadOrWriteToDSPReg(const MachineInstr &MI, bool &isWrite) {
 /// We check for the common case of 'or', as it's MIPS' preferred instruction
 /// for GPRs but we have to check the operands to ensure that is the case.
 /// Other move instructions for MIPS are directly identifiable.
-bool MipsSEInstrInfo::isCopyInstrImpl(const MachineInstr &MI,
-                                      const MachineOperand *&Src,
-                                      const MachineOperand *&Dest) const {
+Optional<DestSourcePair>
+MipsSEInstrInfo::isCopyInstrImpl(const MachineInstr &MI) const {
   bool isDSPControlWrite = false;
   // Condition is made to match the creation of WRDSP/RDDSP copy instruction
   // from copyPhysReg function.
 
   // FIXME: Handle CRead/WriteHWR here as well?
   if (isReadOrWriteToDSPReg(MI, isDSPControlWrite)) {
-    if (!MI.getOperand(1).isImm() || MI.getOperand(1).getImm() != (1<<4))
-      return false;
+    if (!MI.getOperand(1).isImm() || MI.getOperand(1).getImm() != (1 << 4))
+      return None;
     else if (isDSPControlWrite) {
-      Src = &MI.getOperand(0);
-      Dest = &MI.getOperand(2);
+      return DestSourcePair{MI.getOperand(2), MI.getOperand(0)};
+
     } else {
-      Dest = &MI.getOperand(0);
-      Src = &MI.getOperand(2);
+      return DestSourcePair{MI.getOperand(0), MI.getOperand(2)};
     }
-    return true;
   } else if (MI.isMoveReg() || isORCopyInst(MI) || isCIncOffsetCopyInst(MI)) {
-    Dest = &MI.getOperand(0);
-    Src = &MI.getOperand(1);
-    return true;
+    return DestSourcePair{MI.getOperand(0), MI.getOperand(1)};
   }
-  return false;
+  return None;
 }
 
 void MipsSEInstrInfo::
@@ -289,7 +284,7 @@ storeRegToStack(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
     else if (Mips::FGR64RegClass.hasSubClassEq(RC)) {
       DebugLoc DL = I->getDebugLoc();
       MachineRegisterInfo &RegInfo = MBB.getParent()->getRegInfo();
-      unsigned IntReg = RegInfo.createVirtualRegister(&Mips::GPR64RegClass);
+      Register IntReg = RegInfo.createVirtualRegister(&Mips::GPR64RegClass);
       BuildMI(MBB, I, DL, get(Mips::DMFC1), IntReg)
         .addReg(SrcReg);
       BuildMI(MBB, I, DL, get(Mips::CAPSTORE64)).addReg(IntReg, getKillRegState(true))
@@ -408,7 +403,7 @@ loadRegFromStack(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
     else if (Mips::FGR64RegClass.hasSubClassEq(RC)) {
       DebugLoc DL = I->getDebugLoc();
       MachineRegisterInfo &RegInfo = MBB.getParent()->getRegInfo();
-      unsigned IntReg = RegInfo.createVirtualRegister(&Mips::GPR64RegClass);
+      Register IntReg = RegInfo.createVirtualRegister(&Mips::GPR64RegClass);
       BuildMI(MBB, I, DL, get(Mips::CAPLOAD64), IntReg)
         .addReg(Mips::ZERO_64).addFrameIndex(FI).addImm(Offset)
         .addMemOperand(MMO);
@@ -590,10 +585,11 @@ bool MipsSEInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
     BuildMI(MBB, MI, MI.getDebugLoc(), get(Mips::PseudoReturnCap))
       .addReg(Mips::C17);
     break;
-  case Mips::CheriBoundedStackPseudo: {
+  case Mips::CheriBoundedStackPseudoImm:
+  case Mips::CheriBoundedStackPseudoReg: {
     auto Op = MI.getOperand(3).isImm() ? Mips::CSetBoundsImm : Mips::CSetBounds;
     if (Op == Mips::CSetBoundsImm)
-      assert(isInt<11>(MI.getOperand(3).getImm()));
+      assert(isUInt<11>(MI.getOperand(3).getImm()));
     else
       assert(MI.getOperand(3).isReg());
     assert(MI.getOperand(2).getImm() == 0 && "This operand is a dummy and must be zero!");
@@ -766,7 +762,7 @@ unsigned MipsSEInstrInfo::loadImmediate(int64_t Imm, MachineBasicBlock &MBB,
   // The first instruction can be a LUi, which is different from other
   // instructions (ADDiu, ORI and SLL) in that it does not have a register
   // operand.
-  unsigned Reg = RegInfo.createVirtualRegister(RC);
+  Register Reg = RegInfo.createVirtualRegister(RC);
 
   if (Inst->Opc == LUi)
     BuildMI(MBB, II, DL, get(LUi), Reg).addImm(SignExtend64<16>(Inst->ImmOpnd));
@@ -874,9 +870,9 @@ void MipsSEInstrInfo::expandPseudoMTLoHi(MachineBasicBlock &MBB,
   // Add lo/hi registers if the mtlo/hi instructions created have explicit
   // def registers.
   if (HasExplicitDef) {
-    unsigned DstReg = I->getOperand(0).getReg();
-    unsigned DstLo = getRegisterInfo().getSubReg(DstReg, Mips::sub_lo);
-    unsigned DstHi = getRegisterInfo().getSubReg(DstReg, Mips::sub_hi);
+    Register DstReg = I->getOperand(0).getReg();
+    Register DstLo = getRegisterInfo().getSubReg(DstReg, Mips::sub_lo);
+    Register DstHi = getRegisterInfo().getSubReg(DstReg, Mips::sub_hi);
     LoInst.addReg(DstLo, RegState::Define);
     HiInst.addReg(DstHi, RegState::Define);
   }
@@ -913,14 +909,14 @@ void MipsSEInstrInfo::expandExtractElementF64(MachineBasicBlock &MBB,
                                               MachineBasicBlock::iterator I,
                                               bool isMicroMips,
                                               bool FP64) const {
-  unsigned DstReg = I->getOperand(0).getReg();
-  unsigned SrcReg = I->getOperand(1).getReg();
+  Register DstReg = I->getOperand(0).getReg();
+  Register SrcReg = I->getOperand(1).getReg();
   unsigned N = I->getOperand(2).getImm();
   DebugLoc dl = I->getDebugLoc();
 
   assert(N < 2 && "Invalid immediate");
   unsigned SubIdx = N ? Mips::sub_hi : Mips::sub_lo;
-  unsigned SubReg = getRegisterInfo().getSubReg(SrcReg, SubIdx);
+  Register SubReg = getRegisterInfo().getSubReg(SrcReg, SubIdx);
 
   // FPXX on MIPS-II or MIPS32r1 should have been handled with a spill/reload
   // in MipsSEFrameLowering.cpp.
@@ -955,7 +951,7 @@ void MipsSEInstrInfo::expandExtractElementF64(MachineBasicBlock &MBB,
 void MipsSEInstrInfo::expandBuildPairF64(MachineBasicBlock &MBB,
                                          MachineBasicBlock::iterator I,
                                          bool isMicroMips, bool FP64) const {
-  unsigned DstReg = I->getOperand(0).getReg();
+  Register DstReg = I->getOperand(0).getReg();
   unsigned LoReg = I->getOperand(1).getReg(), HiReg = I->getOperand(2).getReg();
   const MCInstrDesc& Mtc1Tdd = get(Mips::MTC1);
   DebugLoc dl = I->getDebugLoc();
@@ -1023,8 +1019,8 @@ void MipsSEInstrInfo::expandEhReturn(MachineBasicBlock &MBB,
   unsigned RA = Subtarget.isGP64bit() ? Mips::RA_64 : Mips::RA;
   unsigned T9 = Subtarget.isGP64bit() ? Mips::T9_64 : Mips::T9;
   unsigned ZERO = Subtarget.isGP64bit() ? Mips::ZERO_64 : Mips::ZERO;
-  unsigned OffsetReg = I->getOperand(0).getReg();
-  unsigned TargetReg = I->getOperand(1).getReg();
+  Register OffsetReg = I->getOperand(0).getReg();
+  Register TargetReg = I->getOperand(1).getReg();
 
   // addu $ra, $v0, $zero
   // addu $sp, $sp, $v1
@@ -1064,16 +1060,18 @@ void MipsSEInstrInfo::expandCCallPseudo(MachineBasicBlock &MBB,
 // For opcodes with the ReMaterializable flag set, this function is called to
 // verify the instruction is really rematable.
 bool MipsSEInstrInfo::isReallyTriviallyReMaterializable(const MachineInstr &MI,
-                                                        AliasAnalysis *AA) const {
+                                                        AAResults *AA) const {
   switch(MI.getOpcode()) {
     // To allow moving CSetBounds on the stack as late as possible.
-    case Mips::CheriBoundedStackPseudo:
+    case Mips::CheriBoundedStackPseudoImm:
       // LLVM_DEBUG(dbgs() << "isReallyTriviallyReMaterializable: CHECKING "; MI.dump();)
       // We cannot trivially rematerialize if the size operand is a GPR since
-      // That might be dead by the time we use it. Only remat
-      return MI.getOperand(3).isImm();
+      // that might be dead by the time we use it -> ignore CheriBoundedStackPseudoReg
+      assert(MI.getOperand(3).isImm());
+      return true;
     case Mips::CIncOffsetImm:
     case Mips::CMove:
+    case Mips::COPY:
       return MI.getOperand(1).isReg() && MI.getOperand(1).getReg() == Mips::CNULL;
     case Mips::LUi64: {
       auto Flags = MI.getOperand(1).getTargetFlags();
@@ -1089,7 +1087,7 @@ bool MipsSEInstrInfo::isReallyTriviallyReMaterializable(const MachineInstr &MI,
 
 void MipsSEInstrInfo::expandCPSETUP(MachineBasicBlock &MBB,
                                     MachineBasicBlock::iterator I) const {
-  unsigned GP = I->getOperand(0).getReg();
+  Register GP = I->getOperand(0).getReg();
   assert(GP != Mips::T9_64);
   DebugLoc DL = I->getDebugLoc();
   const TargetInstrInfo *TII = Subtarget.getInstrInfo();

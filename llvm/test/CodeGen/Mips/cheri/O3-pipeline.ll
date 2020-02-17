@@ -12,8 +12,8 @@
 ; CHECK-NEXT:Type-Based Alias Analysis
 ; CHECK-NEXT:Scoped NoAlias Alias Analysis
 ; CHECK-NEXT:Assumption Cache Tracker
-; CHECK-NEXT:Create Garbage Collector Module Metadata
 ; CHECK-NEXT:Profile summary info
+; CHECK-NEXT:Create Garbage Collector Module Metadata
 ; CHECK-NEXT:Machine Branch Probability Analysis
 ; CHECK-NEXT:  ModulePass Manager
 ; CHECK-NEXT:    Pre-ISel Intrinsic Lowering
@@ -30,9 +30,13 @@
 ; CHECK-NEXT:      Basic Alias Analysis (stateless AA impl)
 ; CHECK-NEXT:      Function Alias Analysis Results
 ; CHECK-NEXT:      Merge contiguous icmps into a memcmp
+; CHECK-NEXT:      Natural Loop Information
+; CHECK-NEXT:      Lazy Branch Probability Analysis
+; CHECK-NEXT:      Lazy Block Frequency Analysis
 ; CHECK-NEXT:      Expand memcmp() to load/stores
 ; CHECK-NEXT:      Lower Garbage Collection Instructions
 ; CHECK-NEXT:      Shadow Stack GC Lowering
+; CHECK-NEXT:      Lower constant intrinsics
 ; CHECK-NEXT:      Remove unreachable blocks from the CFG
 ; CHECK-NEXT:      Dominator Tree Construction
 ; CHECK-NEXT:      Natural Loop Information
@@ -44,7 +48,7 @@
 ; CHECK-NEXT:      Scalarize Masked Memory Intrinsics
 ; CHECK-NEXT:      Expand reduction intrinsics
 ; CHECK-NEXT:      Expand Atomic instructions
-; CHERI-NEXT:      CHERI fold capability intrinsics
+; CHERI-NEXT:    CHERI fold capability intrinsics
 ; CHERI-NEXT:    FunctionPass Manager
 ; CHECK-NEXT:      Dominator Tree Construction
 ; CHECK-NEXT:      Natural Loop Information
@@ -53,8 +57,8 @@
 ; CHERI-NEXT:      Post-Dominator Tree Construction
 ; CHERI-NEXT:      Aggressive Dead Code Elimination
 ; CHERI-NEXT:      CHERI range checker
-; CHERI-NEXT:      CHERI sandbox ABI setup
-; CHERI-NEXT:      FunctionPass Manager
+; CHERI-NEXT:    CHERI sandbox ABI setup
+; CHERI-NEXT:    FunctionPass Manager
 ; CHERI-NEXT:      Dominator Tree Construction
 ; CHERI-NEXT:      Natural Loop Information
 ; CHECK-NEXT:      CodeGen Prepare
@@ -71,10 +75,15 @@
 ; CHECK-NEXT:      Function Alias Analysis Results
 ; CHECK-NEXT:      Natural Loop Information
 ; CHECK-NEXT:      Branch Probability Analysis
+; CHECK-NEXT:      Lazy Branch Probability Analysis
+; CHECK-NEXT:      Lazy Block Frequency Analysis
 ; CHECK-NEXT:      MIPS DAG->DAG Pattern Instruction Selection
 ; CHECK-NEXT:      Branch Probability Analysis
+; CHECK-NEXT:      Lazy Branch Probability Analysis
+; CHECK-NEXT:      Lazy Block Frequency Analysis
 ; CHECK-NEXT:      MIPS DAG->DAG Pattern Instruction Selection
-; CHECK-NEXT:      Expand ISel Pseudo-instructions
+; CHECK-NEXT:      Finalize ISel and expand pseudo-instructions
+; CHECK-NEXT:      Lazy Machine Block Frequency Analysis
 ; CHECK-NEXT:      Early Tail Duplication
 ; CHECK-NEXT:      Optimize machine instruction PHIs
 ; CHECK-NEXT:      Slot index numbering
@@ -84,15 +93,18 @@
 ; CHECK-NEXT:      MachineDominator Tree Construction
 ; CHECK-NEXT:      Machine Natural Loop Construction
 ; CHECK-NEXT:      Early Machine Loop Invariant Code Motion
+; CHECK-NEXT:      MachineDominator Tree Construction
+; CHECK-NEXT:      Machine Block Frequency Analysis
 ; CHECK-NEXT:      Machine Common Subexpression Elimination
 ; CHECK-NEXT:      MachinePostDominator Tree Construction
-; CHECK-NEXT:      Machine Block Frequency Analysis
 ; CHECK-NEXT:      Machine code sinking
 ; CHECK-NEXT:      Peephole Optimizations
 ; CHECK-NEXT:      Remove dead machine instructions
+; CHECK-NEXT:      MachineDominator Tree Construction
 ; CHECK-NEXT:      Mips MipsOptimizePICCall
 ; CHERI-NEXT:      MachineDominator Tree Construction
 ; CHERI-NEXT:      Machine Natural Loop Construction
+; CHERI-NEXT:      MachinePostDominator Tree Construction
 ; CHERI-NEXT:      Cheri Addressing Mode Folder
 ; CHERI-NEXT:      Remove dead machine instructions
 ; CHERI-NEXT:      Cheri128 fail hard
@@ -128,12 +140,14 @@
 ; CHERI-NEXT:      MachineDominator Tree Construction
 ; CHERI-NEXT:      Machine Natural Loop Construction
 ; CHECK-NEXT:      Machine Block Frequency Analysis
+; MIPS-NEXT:      MachineDominator Tree Construction
 ; CHECK-NEXT:      MachinePostDominator Tree Construction
 ; CHECK-NEXT:      Lazy Machine Block Frequency Analysis
 ; CHECK-NEXT:      Machine Optimization Remark Emitter
 ; CHECK-NEXT:      Shrink Wrapping analysis
 ; CHECK-NEXT:      Prologue/Epilogue Insertion & Frame Finalization
 ; CHECK-NEXT:      Control Flow Optimizer
+; CHECK-NEXT:      Lazy Machine Block Frequency Analysis
 ; CHECK-NEXT:      Tail Duplication
 ; CHECK-NEXT:      Machine Copy Propagation Pass
 ; CHECK-NEXT:      Post-RA pseudo instruction expansion pass
@@ -144,6 +158,9 @@
 ; CHECK-NEXT:      Machine Block Frequency Analysis
 ; CHECK-NEXT:      MachinePostDominator Tree Construction
 ; CHECK-NEXT:      Branch Probability Basic Block Placement
+; CHECK-NEXT:      Insert fentry calls
+; CHECK-NEXT:      Insert XRay ops
+; CHECK-NEXT:      Implement the 'patchable-function' attribute
 ; CHECK-NEXT:      Mips pseudo instruction expansion pass
 ; CHECK-NEXT:      microMIPS instruction size reduction pass
 ; CHECK-NEXT:      Mips Delay Slot Filler
@@ -152,9 +169,6 @@
 ; CHECK-NEXT:      Contiguously Lay Out Funclets
 ; CHECK-NEXT:      StackMap Liveness Analysis
 ; CHECK-NEXT:      Live DEBUG_VALUE analysis
-; CHECK-NEXT:      Insert fentry calls
-; CHECK-NEXT:      Insert XRay ops
-; CHECK-NEXT:      Implement the 'patchable-function' attribute
 ; CHECK-NEXT:      Lazy Machine Block Frequency Analysis
 ; CHECK-NEXT:      Machine Optimization Remark Emitter
 ; CHECK-NEXT:      Mips Assembly Printer

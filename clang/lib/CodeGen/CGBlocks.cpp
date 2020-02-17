@@ -19,6 +19,7 @@
 #include "CodeGenModule.h"
 #include "ConstantEmitter.h"
 #include "TargetInfo.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/CodeGen/ConstantInitBuilder.h"
 #include "llvm/ADT/SmallSet.h"
@@ -1082,7 +1083,7 @@ llvm::Value *CodeGenFunction::EmitBlockLiteral(const CGBlockInfo &blockInfo) {
                           /*RefersToEnclosingVariableOrCapture*/ CI.isNested(),
                           type.getNonReferenceType(), VK_LValue,
                           SourceLocation());
-      src = EmitDeclRefLValue(&declRef).getAddress();
+      src = EmitDeclRefLValue(&declRef).getAddress(*this);
     };
 
     // For byrefs, we just write the pointer to the byref struct into
@@ -1261,8 +1262,7 @@ llvm::Type *CodeGenModule::getGenericBlockLiteralType() {
 
 RValue CodeGenFunction::EmitBlockCallExpr(const CallExpr *E,
                                           ReturnValueSlot ReturnValue) {
-  const BlockPointerType *BPT =
-    E->getCallee()->getType()->getAs<BlockPointerType>();
+  const auto *BPT = E->getCallee()->getType()->castAs<BlockPointerType>();
   llvm::Value *BlockPtr = EmitScalarExpr(E->getCallee());
   llvm::Type *GenBlockTy = CGM.getGenericBlockLiteralType();
   llvm::Value *Func = nullptr;
@@ -1443,9 +1443,11 @@ static llvm::Constant *buildGlobalBlock(CodeGenModule &CGM,
   if (CGM.getContext().getLangOpts().OpenCL)
     AddrSpace = CGM.getTargetAddressSpace(LangAS::opencl_global);
 
-  llvm::Constant *literal = fields.finishAndCreateGlobal(
+  llvm::GlobalVariable *literal = fields.finishAndCreateGlobal(
       "__block_literal_global", blockInfo.BlockAlign,
       /*constant*/ !IsWindows, llvm::GlobalVariable::InternalLinkage, AddrSpace);
+
+  literal->addAttribute("objc_arc_inert");
 
   // Windows does not allow globals to be initialised to point to globals in
   // different DLLs.  Any such variables must run code to initialise them.
@@ -1490,8 +1492,7 @@ void CodeGenFunction::setBlockContextParameter(const ImplicitParamDecl *D,
   Address alloc = CreateMemTemp(D->getType(), D->getName() + ".addr");
   Builder.CreateStore(arg, alloc);
   if (CGDebugInfo *DI = getDebugInfo()) {
-    if (CGM.getCodeGenOpts().getDebugInfo() >=
-        codegenoptions::LimitedDebugInfo) {
+    if (CGM.getCodeGenOpts().hasReducedDebugInfo()) {
       DI->setLocation(D->getLocation());
       DI->EmitDeclareOfBlockLiteralArgVariable(
           *BlockInfo, D->getName(), argNum,
@@ -1663,8 +1664,7 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
       const VarDecl *variable = CI.getVariable();
       DI->EmitLocation(Builder, variable->getLocation());
 
-      if (CGM.getCodeGenOpts().getDebugInfo() >=
-          codegenoptions::LimitedDebugInfo) {
+      if (CGM.getCodeGenOpts().hasReducedDebugInfo()) {
         const CGBlockInfo::Capture &capture = blockInfo.getCapture(variable);
         if (capture.isConstant()) {
           auto addr = LocalDeclMap.find(variable)->second;
@@ -1809,7 +1809,7 @@ struct CallBlockRelease final : EHScopeStack::Cleanup {
 bool CodeGenFunction::cxxDestructorCanThrow(QualType T) {
   if (const auto *RD = T->getAsCXXRecordDecl())
     if (const CXXDestructorDecl *DD = RD->getDestructor())
-      return DD->getType()->getAs<FunctionProtoType>()->canThrow();
+      return DD->getType()->castAs<FunctionProtoType>()->canThrow();
   return false;
 }
 

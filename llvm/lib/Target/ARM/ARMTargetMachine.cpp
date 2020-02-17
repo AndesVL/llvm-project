@@ -46,6 +46,7 @@
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/Transforms/CFGuard.h"
 #include "llvm/Transforms/Scalar.h"
 #include <cassert>
 #include <memory>
@@ -78,7 +79,7 @@ namespace llvm {
   void initializeARMExecutionDomainFixPass(PassRegistry&);
 }
 
-extern "C" void LLVMInitializeARMTarget() {
+extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeARMTarget() {
   // Register the target.
   RegisterTargetMachine<ARMLETargetMachine> X(getTheARMLETarget());
   RegisterTargetMachine<ARMLETargetMachine> A(getTheThumbLETarget());
@@ -90,19 +91,22 @@ extern "C" void LLVMInitializeARMTarget() {
   initializeARMLoadStoreOptPass(Registry);
   initializeARMPreAllocLoadStoreOptPass(Registry);
   initializeARMParallelDSPPass(Registry);
-  initializeARMCodeGenPreparePass(Registry);
   initializeARMConstantIslandsPass(Registry);
   initializeARMExecutionDomainFixPass(Registry);
   initializeARMExpandPseudoPass(Registry);
   initializeThumb2SizeReducePass(Registry);
+  initializeMVEVPTBlockPass(Registry);
+  initializeMVETailPredicationPass(Registry);
+  initializeARMLowOverheadLoopsPass(Registry);
+  initializeMVEGatherScatterLoweringPass(Registry);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
   if (TT.isOSBinFormatMachO())
-    return llvm::make_unique<TargetLoweringObjectFileMachO>();
+    return std::make_unique<TargetLoweringObjectFileMachO>();
   if (TT.isOSWindows())
-    return llvm::make_unique<TargetLoweringObjectFileCOFF>();
-  return llvm::make_unique<ARMElfTargetObjectFile>();
+    return std::make_unique<TargetLoweringObjectFileCOFF>();
+  return std::make_unique<ARMElfTargetObjectFile>();
 }
 
 static ARMBaseTargetMachine::ARMABI
@@ -280,7 +284,7 @@ ARMBaseTargetMachine::getSubtargetImpl(const Function &F) const {
     // creation will depend on the TM and the code generation flags on the
     // function that reside in TargetOptions.
     resetTargetOptions(F);
-    I = llvm::make_unique<ARMSubtarget>(TargetTriple, CPU, FS, *this, isLittle,
+    I = std::make_unique<ARMSubtarget>(TargetTriple, CPU, FS, *this, isLittle,
                                         F.hasMinSize());
 
     if (!I->isThumb() && !I->hasARMOps())
@@ -318,14 +322,7 @@ namespace {
 class ARMPassConfig : public TargetPassConfig {
 public:
   ARMPassConfig(ARMBaseTargetMachine &TM, PassManagerBase &PM)
-      : TargetPassConfig(TM, PM) {
-    if (TM.getOptLevel() != CodeGenOpt::None) {
-      ARMGenSubtargetInfo STI(TM.getTargetTriple(), TM.getTargetCPU(),
-                              TM.getTargetFeatureString());
-      if (STI.hasFeature(ARM::FeatureUseMISched))
-        substitutePass(&PostRASchedulerID, &PostMachineSchedulerID);
-    }
-  }
+      : TargetPassConfig(TM, PM) {}
 
   ARMBaseTargetMachine &getARMTargetMachine() const {
     return getTM<ARMBaseTargetMachine>();
@@ -408,6 +405,8 @@ void ARMPassConfig::addIRPasses() {
           return ST.hasAnyDataBarrier() && !ST.isThumb1Only();
         }));
 
+  addPass(createMVEGatherScatterLoweringPass());
+
   TargetPassConfig::addIRPasses();
 
   // Run the parallel DSP pass.
@@ -417,11 +416,15 @@ void ARMPassConfig::addIRPasses() {
   // Match interleaved memory accesses to ldN/stN intrinsics.
   if (TM->getOptLevel() != CodeGenOpt::None)
     addPass(createInterleavedAccessPass());
+
+  // Add Control Flow Guard checks.
+  if (TM->getTargetTriple().isOSWindows())
+    addPass(createCFGuardCheckPass());
 }
 
 void ARMPassConfig::addCodeGenPrepare() {
   if (getOptLevel() != CodeGenOpt::None)
-    addPass(createARMCodeGenPreparePass());
+    addPass(createTypePromotionPass());
   TargetPassConfig::addCodeGenPrepare();
 }
 
@@ -443,6 +446,11 @@ bool ARMPassConfig::addPreISel() {
     bool MergeExternalByDefault = !TM->getTargetTriple().isOSBinFormatMachO();
     addPass(createGlobalMergePass(TM, 127, OnlyOptimizeForSize,
                                   MergeExternalByDefault));
+  }
+
+  if (TM->getOptLevel() != CodeGenOpt::None) {
+    addPass(createHardwareLoopsPass());
+    addPass(createMVETailPredicationPass());
   }
 
   return false;
@@ -508,7 +516,15 @@ void ARMPassConfig::addPreSched2() {
       return !MF.getSubtarget<ARMSubtarget>().isThumb1Only();
     }));
   }
+  addPass(createMVEVPTBlockPass());
   addPass(createThumb2ITBlockPass());
+
+  // Add both scheduling passes to give the subtarget an opportunity to pick
+  // between them.
+  if (getOptLevel() != CodeGenOpt::None) {
+    addPass(&PostMachineSchedulerID);
+    addPass(&PostRASchedulerID);
+  }
 }
 
 void ARMPassConfig::addPreEmitPass() {
@@ -524,4 +540,9 @@ void ARMPassConfig::addPreEmitPass() {
     addPass(createARMOptimizeBarriersPass());
 
   addPass(createARMConstantIslandPass());
+  addPass(createARMLowOverheadLoopsPass());
+
+  // Identify valid longjmp targets for Windows Control Flow Guard.
+  if (TM->getTargetTriple().isOSWindows())
+    addPass(createCFGuardLongjmpPass());
 }

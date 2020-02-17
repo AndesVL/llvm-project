@@ -55,8 +55,10 @@ protected:
 public:
   AMDGPUToolChain(const Driver &D, const llvm::Triple &Triple,
                   const llvm::opt::ArgList &Args);
-  unsigned GetDefaultDwarfVersion() const override { return 5; }
+  unsigned GetDefaultDwarfVersion() const override { return 4; }
   bool IsIntegratedAssemblerDefault() const override { return true; }
+  bool IsMathErrnoDefault() const override { return false; }
+
   llvm::opt::DerivedArgList *
   TranslateArgs(const llvm::opt::DerivedArgList &Args, StringRef BoundArch,
                 Action::OffloadKind DeviceOffloadKind) const override;
@@ -64,6 +66,11 @@ public:
   void addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
                              llvm::opt::ArgStringList &CC1Args,
                              Action::OffloadKind DeviceOffloadKind) const override;
+
+  llvm::DenormalMode getDefaultDenormalModeForType(
+      const llvm::opt::ArgList &DriverArgs,
+      Action::OffloadKind DeviceOffloadKind,
+      const llvm::fltSemantics *FPType = nullptr) const override;
 };
 
 } // end namespace toolchains

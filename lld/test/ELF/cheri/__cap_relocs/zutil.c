@@ -2,7 +2,7 @@
 
 // Check that when we use R_CHERI_CAPABILITY instead of legacy cap_relocs the zutil.c test works as expected (i.e. bounds on the strings)
 
-// RUN: %cheri_purecap_clang %s -c -o %t.o
+// RUN: %cheri_purecap_cc1 -emit-obj %s -o %t.o
 // RUN: llvm-readobj -r %t.o | FileCheck -check-prefix OBJ-RELOCS %s
 // RUN: ld.lld -shared --enable-new-dtags -o %t.so --fatal-warnings %t.o
 // RUN: llvm-objdump --cap-relocs -s -t --section=.rodata %t.so | FileCheck %s
@@ -33,9 +33,9 @@ z_const char * const z_errmsg[10] = {
 // OBJ-RELOCS-NEXT:  ]
 
 // CHECK-LABEL: CAPABILITY RELOCATION RECORDS:
-// CHECK-NEXT:  0x0000000000010000	Base: <Unnamed symbol> (0x0000000000000403)	Offset: 0x0000000000000000	Length: 0x0000000000000010	Permissions: 0x4000000000000000 (Constant)
-// CHECK-NEXT:  0x00000000000100{{1|2}}0	Base: <Unnamed symbol> (0x0000000000000413)	Offset: 0x0000000000000000	Length: 0x000000000000000b	Permissions: 0x4000000000000000 (Constant)
-// CHECK-NEXT:  0x00000000000100{{2|4}}0	Base: <Unnamed symbol> (0x000000000000[[RODATA_ADDR:0402]])	Offset: 0x0000000000000000	Length: 0x0000000000000001	Permissions: 0x4000000000000000 (Constant)
+// CHECK-NEXT:  0x00000000000204a0	Base: <Unnamed symbol> (0x0000000000000403)	Offset: 0x0000000000000000	Length: 0x0000000000000010	Permissions: 0x4000000000000000 (Constant)
+// CHECK-NEXT:  0x00000000000204{{b|c}}0	Base: <Unnamed symbol> (0x0000000000000413)	Offset: 0x0000000000000000	Length: 0x000000000000000b	Permissions: 0x4000000000000000 (Constant)
+// CHECK-NEXT:  0x00000000000204{{c|e}}0	Base: <Unnamed symbol> (0x000000000000[[RODATA_ADDR:0402]])	Offset: 0x0000000000000000	Length: 0x0000000000000001	Permissions: 0x4000000000000000 (Constant)
 // CHECK-EMPTY:
 
 // CHECK-LABEL:  Contents of section .rodata:

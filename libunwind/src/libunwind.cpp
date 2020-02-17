@@ -69,6 +69,8 @@ _LIBUNWIND_HIDDEN int __unw_init_local(unw_cursor_t *cursor,
 # warning The MIPS architecture is not supported with this ABI and environment!
 #elif defined(__sparc__)
 # define REGISTER_KIND Registers_sparc
+#elif defined(__riscv) && __riscv_xlen == 64
+# define REGISTER_KIND Registers_riscv
 #else
 # error Architecture not supported
 #endif
@@ -123,7 +125,7 @@ _LIBUNWIND_HIDDEN int __unw_set_reg(unw_cursor_t *cursor, unw_regnum_t regNum,
       // this should actually be - info.gp. LLVM doesn't currently support
       // any such platforms and Clang doesn't export a macro for them.
       if (info.gp)
-        co->setReg(UNW_REG_SP, co->getReg(UNW_REG_SP) + info.gp);
+        co->setReg(UNW_REG_SP, co->getReg(UNW_REG_SP) + _pint_to_addr(info.gp));
     }
     return UNW_ESUCCESS;
   }
@@ -182,8 +184,7 @@ _LIBUNWIND_HIDDEN int __unw_get_proc_info(unw_cursor_t *cursor,
   co->getInfo(info);
   if (info->end_ip == 0)
     return UNW_ENOINFO;
-  else
-    return UNW_ESUCCESS;
+  return UNW_ESUCCESS;
 }
 _LIBUNWIND_WEAK_ALIAS(__unw_get_proc_info, unw_get_proc_info)
 
@@ -198,15 +199,14 @@ _LIBUNWIND_WEAK_ALIAS(__unw_resume, unw_resume)
 
 /// Get name of function at cursor position in stack frame.
 _LIBUNWIND_HIDDEN int __unw_get_proc_name(unw_cursor_t *cursor, char *buf,
-                                          size_t bufLen, unw_word_t *offset) {
+                                          size_t bufLen, size_t *offset) {
   _LIBUNWIND_TRACE_API("__unw_get_proc_name(cursor=%p, &buf=%p, bufLen=%lu)",
                        static_cast<void *>(cursor), static_cast<void *>(buf),
                        static_cast<unsigned long>(bufLen));
   AbstractUnwindCursor *co = (AbstractUnwindCursor *)cursor;
   if (co->getFunctionName(buf, bufLen, offset))
     return UNW_ESUCCESS;
-  else
-    return UNW_EUNSPEC;
+  return UNW_EUNSPEC;
 }
 _LIBUNWIND_WEAK_ALIAS(__unw_get_proc_name, unw_get_proc_name)
 
@@ -267,8 +267,9 @@ void __unw_add_dynamic_fde(unw_word_t fde) {
   CFI_Parser<LocalAddressSpace>::FDE_Info fdeInfo;
   CFI_Parser<LocalAddressSpace>::CIE_Info cieInfo;
   const char *message = CFI_Parser<LocalAddressSpace>::decodeFDE(
-                           LocalAddressSpace::sThisAddressSpace, 0,
-                          (LocalAddressSpace::pint_t) fde, &fdeInfo, &cieInfo);
+      LocalAddressSpace::sThisAddressSpace,
+      LocalAddressSpace::pc_t{(uintptr_t) nullptr},
+      (LocalAddressSpace::pint_t)fde, &fdeInfo, &cieInfo);
   if (message == NULL) {
     // dynamically registered FDEs don't have a mach_header group they are in.
     // Use fde as mh_group

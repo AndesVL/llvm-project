@@ -48,7 +48,18 @@ enum NodeType : unsigned {
   // This is a more convenient semantic for producing dagcombines that remove
   // unnecessary GPR->FPR->GPR moves.
   FMV_W_X_RV64,
-  FMV_X_ANYEXTW_RV64
+  FMV_X_ANYEXTW_RV64,
+  // READ_CYCLE_WIDE - A read of the 64-bit cycle CSR on a 32-bit target
+  // (returns (Lo, Hi)). It takes a chain operand.
+  READ_CYCLE_WIDE,
+  CAP_CALL,
+  CAP_TAIL,
+  /// Legalised int_cheri_cap_tag_get
+  CAP_TAG_GET,
+  /// Legalised int_cheri_cap_sealed_get
+  CAP_SEALED_GET,
+  /// Legalised int_cheri_cap_subset_test
+  CAP_SUBSET_TEST,
 };
 }
 
@@ -81,6 +92,11 @@ public:
 
   SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
 
+  void computeKnownBitsForTargetNode(const SDValue Op, KnownBits &Known,
+                                     const APInt &DemandedElts,
+                                     const SelectionDAG &DAG,
+                                     unsigned Depth = 0) const override;
+
   unsigned ComputeNumSignBitsForTargetNode(SDValue Op,
                                            const APInt &DemandedElts,
                                            const SelectionDAG &DAG,
@@ -88,6 +104,10 @@ public:
 
   // This method returns the name of a target specific DAG node.
   const char *getTargetNodeName(unsigned Opcode) const override;
+
+  ConstraintType getConstraintType(StringRef Constraint) const override;
+
+  unsigned getInlineAsmMemConstraint(StringRef ConstraintCode) const override;
 
   std::pair<unsigned, const TargetRegisterClass *>
   getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
@@ -120,11 +140,40 @@ public:
     return ISD::SIGN_EXTEND;
   }
 
+  ISD::NodeType getExtendForAtomicCmpSwapArg() const override {
+    return ISD::SIGN_EXTEND;
+  }
+
   bool shouldExpandShift(SelectionDAG &DAG, SDNode *N) const override {
     if (DAG.getMachineFunction().getFunction().hasMinSize())
       return false;
     return true;
   }
+  bool isDesirableToCommuteWithShift(const SDNode *N,
+                                     CombineLevel Level) const override;
+
+  /// If a physical register, this returns the register that receives the
+  /// exception address on entry to an EH pad.
+  unsigned
+  getExceptionPointerRegister(const Constant *PersonalityFn) const override;
+
+  /// If a physical register, this returns the register that receives the
+  /// exception typeid on entry to a landing pad.
+  unsigned
+  getExceptionSelectorRegister(const Constant *PersonalityFn) const override;
+
+  bool shouldExtendTypeInLibCall(EVT Type) const override;
+
+  /// Returns the register with the specified architectural or ABI name. This
+  /// method is necessary to lower the llvm.read_register.* and
+  /// llvm.write_register.* intrinsics. Allocatable registers must be reserved
+  /// with the clang -ffixed-xX flag for access to be allowed.
+  Register getRegisterByName(const char *RegName, LLT VT,
+                             const MachineFunction &MF) const override;
+
+  EVT getOptimalMemOpType(uint64_t Size, unsigned DstAlign, unsigned SrcAlign,
+                          bool IsMemset, bool ZeroMemset, bool MemcpyStrSrc,
+                          const AttributeList &FuncAttributes) const override;
 
 private:
   void analyzeInputArgs(MachineFunction &MF, CCState &CCInfo,
@@ -155,17 +204,31 @@ private:
   }
 
   template <class NodeTy>
-  SDValue getAddr(NodeTy *N, SelectionDAG &DAG, bool IsLocal = true) const;
+  SDValue getAddr(NodeTy *N, EVT Ty, SelectionDAG &DAG, bool IsLocal,
+                  bool CanDeriveFromPcc) const;
 
+  SDValue getStaticTLSAddr(GlobalAddressSDNode *N, EVT Ty, SelectionDAG &DAG,
+                           bool NotLocal) const;
+  SDValue getDynamicTLSAddr(GlobalAddressSDNode *N, EVT Ty,
+                            SelectionDAG &DAG) const;
+
+  bool shouldConsiderGEPOffsetSplit() const override { return true; }
   SDValue lowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerConstantPool(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerSELECT(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVASTART(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerShiftLeftParts(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerShiftRightParts(SDValue Op, SelectionDAG &DAG, bool IsSRA) const;
+
+  bool hasCapabilitySetAddress() const override { return true; }
+
+  TailPaddingAmount
+  getTailPaddingForPreciseBounds(uint64_t Size) const override;
+  Align getAlignmentForPreciseBounds(uint64_t Size) const override;
 
   bool isEligibleForTailCallOptimization(
       CCState &CCInfo, CallLoweringInfo &CLI, MachineFunction &MF,
@@ -183,6 +246,14 @@ private:
                                    Value *AlignedAddr, Value *CmpVal,
                                    Value *NewVal, Value *Mask,
                                    AtomicOrdering Ord) const override;
+  virtual bool canLowerPointerTypeCmpXchg(
+      const DataLayout &DL, AtomicCmpXchgInst *AI) const override;
+
+  /// Generate error diagnostics if any register used by CC has been marked
+  /// reserved.
+  void validateCCReservedRegs(
+      const SmallVectorImpl<std::pair<llvm::Register, llvm::SDValue>> &Regs,
+      MachineFunction &MF) const;
 };
 }
 

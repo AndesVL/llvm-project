@@ -14,8 +14,9 @@
 #include <mutex>
 
 #include "AppleObjCRuntime.h"
-#include "lldb/Target/ObjCLanguageRuntime.h"
 #include "lldb/lldb-private.h"
+
+#include "Plugins/LanguageRuntime/ObjC/ObjCLanguageRuntime.h"
 
 class RemoteNXMapTable;
 
@@ -67,8 +68,6 @@ public:
                               const char *ivar_name) override;
 
   void UpdateISAToDescriptorMapIfNeeded() override;
-
-  ConstString GetActualTypeName(ObjCLanguageRuntime::ObjCISA isa) override;
 
   ClassDescriptorSP GetClassDescriptor(ValueObject &in_value) override;
 

@@ -37,12 +37,14 @@ class BreakpointLocationList;
 class BreakpointName;
 class BreakpointOptionGroup;
 class BreakpointOptions;
+class BreakpointPrecondition;
 class BreakpointResolver;
 class BreakpointSite;
 class BreakpointSiteList;
 class BroadcastEventSpec;
 class Broadcaster;
 class BroadcasterManager;
+class CallFrameInfo;
 class ClangASTContext;
 class ClangASTImporter;
 class ClangASTMetadata;
@@ -258,7 +260,6 @@ class TypeEnumMemberImpl;
 class TypeEnumMemberListImpl;
 class TypeFormatImpl;
 class TypeNameSpecifierImpl;
-class TypeValidatorImpl;
 class UUID;
 class UnixSignals;
 class Unwind;
@@ -298,6 +299,7 @@ typedef std::shared_ptr<lldb_private::BreakpointSite> BreakpointSiteSP;
 typedef std::weak_ptr<lldb_private::BreakpointSite> BreakpointSiteWP;
 typedef std::shared_ptr<lldb_private::BreakpointLocation> BreakpointLocationSP;
 typedef std::weak_ptr<lldb_private::BreakpointLocation> BreakpointLocationWP;
+typedef std::shared_ptr<lldb_private::BreakpointPrecondition> BreakpointPreconditionSP;
 typedef std::shared_ptr<lldb_private::BreakpointResolver> BreakpointResolverSP;
 typedef std::shared_ptr<lldb_private::Broadcaster> BroadcasterSP;
 typedef std::shared_ptr<lldb_private::BroadcasterManager> BroadcasterManagerSP;
@@ -329,6 +331,7 @@ typedef std::shared_ptr<lldb_private::EventDataStructuredData>
 typedef std::shared_ptr<lldb_private::ExecutionContextRef>
     ExecutionContextRefSP;
 typedef std::shared_ptr<lldb_private::ExpressionVariable> ExpressionVariableSP;
+typedef std::unique_ptr<lldb_private::File> FileUP;
 typedef std::shared_ptr<lldb_private::File> FileSP;
 typedef std::shared_ptr<lldb_private::Function> FunctionSP;
 typedef std::shared_ptr<lldb_private::FunctionCaller> FunctionCallerSP;
@@ -457,7 +460,6 @@ typedef std::shared_ptr<lldb_private::TypeNameSpecifierImpl>
     TypeNameSpecifierImplSP;
 typedef std::shared_ptr<lldb_private::TypeSummaryImpl> TypeSummaryImplSP;
 typedef std::shared_ptr<lldb_private::TypeSummaryOptions> TypeSummaryOptionsSP;
-typedef std::shared_ptr<lldb_private::TypeValidatorImpl> TypeValidatorImplSP;
 typedef std::shared_ptr<lldb_private::ScriptedSyntheticChildren>
     ScriptedSyntheticChildrenSP;
 typedef std::shared_ptr<lldb_private::UnixSignals> UnixSignalsSP;

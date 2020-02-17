@@ -16,8 +16,6 @@
 namespace llvm {
 namespace orc {
 
-void LazyCallThroughManager::NotifyResolvedFunction::anchor() {}
-
 LazyCallThroughManager::LazyCallThroughManager(
     ExecutionSession &ES, JITTargetAddress ErrorHandlerAddr,
     std::unique_ptr<TrampolinePool> TP)
@@ -25,7 +23,7 @@ LazyCallThroughManager::LazyCallThroughManager(
 
 Expected<JITTargetAddress> LazyCallThroughManager::getCallThroughTrampoline(
     JITDylib &SourceJD, SymbolStringPtr SymbolName,
-    std::shared_ptr<NotifyResolvedFunction> NotifyResolved) {
+    NotifyResolvedFunction NotifyResolved) {
   std::lock_guard<std::mutex> Lock(LCTMMutex);
   auto Trampoline = TP->getTrampoline();
 
@@ -51,8 +49,9 @@ LazyCallThroughManager::callThroughToSymbol(JITTargetAddress TrampolineAddr) {
     SymbolName = I->second.second;
   }
 
-  auto LookupResult =
-      ES.lookup(JITDylibSearchList({{SourceJD, true}}), SymbolName);
+  auto LookupResult = ES.lookup(
+      makeJITDylibSearchOrder(SourceJD, JITDylibLookupFlags::MatchAllSymbols),
+      SymbolName);
 
   if (!LookupResult) {
     ES.reportError(LookupResult.takeError());
@@ -61,18 +60,18 @@ LazyCallThroughManager::callThroughToSymbol(JITTargetAddress TrampolineAddr) {
 
   auto ResolvedAddr = LookupResult->getAddress();
 
-  std::shared_ptr<NotifyResolvedFunction> NotifyResolved = nullptr;
+  NotifyResolvedFunction NotifyResolved;
   {
     std::lock_guard<std::mutex> Lock(LCTMMutex);
     auto I = Notifiers.find(TrampolineAddr);
     if (I != Notifiers.end()) {
-      NotifyResolved = I->second;
+      NotifyResolved = std::move(I->second);
       Notifiers.erase(I);
     }
   }
 
   if (NotifyResolved) {
-    if (auto Err = (*NotifyResolved)(*SourceJD, SymbolName, ResolvedAddr)) {
+    if (auto Err = NotifyResolved(ResolvedAddr)) {
       ES.reportError(std::move(Err));
       return ErrorHandlerAddr;
     }
@@ -91,6 +90,7 @@ createLocalLazyCallThroughManager(const Triple &T, ExecutionSession &ES,
         inconvertibleErrorCode());
 
   case Triple::aarch64:
+  case Triple::aarch64_32:
     return LocalLazyCallThroughManager::Create<OrcAArch64>(ES,
                                                            ErrorHandlerAddr);
 
@@ -121,15 +121,12 @@ createLocalLazyCallThroughManager(const Triple &T, ExecutionSession &ES,
 
 LazyReexportsMaterializationUnit::LazyReexportsMaterializationUnit(
     LazyCallThroughManager &LCTManager, IndirectStubsManager &ISManager,
-    JITDylib &SourceJD, SymbolAliasMap CallableAliases, VModuleKey K)
+    JITDylib &SourceJD, SymbolAliasMap CallableAliases, ImplSymbolMap *SrcJDLoc,
+    VModuleKey K)
     : MaterializationUnit(extractFlags(CallableAliases), std::move(K)),
       LCTManager(LCTManager), ISManager(ISManager), SourceJD(SourceJD),
       CallableAliases(std::move(CallableAliases)),
-      NotifyResolved(LazyCallThroughManager::createNotifyResolvedFunction(
-          [&ISManager](JITDylib &JD, const SymbolStringPtr &SymbolName,
-                       JITTargetAddress ResolvedAddr) {
-            return ISManager.updatePointer(*SymbolName, ResolvedAddr);
-          })) {}
+      AliaseeTable(SrcJDLoc) {}
 
 StringRef LazyReexportsMaterializationUnit::getName() const {
   return "<Lazy Reexports>";
@@ -149,13 +146,17 @@ void LazyReexportsMaterializationUnit::materialize(
 
   if (!CallableAliases.empty())
     R.replace(lazyReexports(LCTManager, ISManager, SourceJD,
-                            std::move(CallableAliases)));
+                            std::move(CallableAliases), AliaseeTable));
 
   IndirectStubsManager::StubInitsMap StubInits;
   for (auto &Alias : RequestedAliases) {
 
     auto CallThroughTrampoline = LCTManager.getCallThroughTrampoline(
-        SourceJD, Alias.second.Aliasee, NotifyResolved);
+        SourceJD, Alias.second.Aliasee,
+        [&ISManager = this->ISManager,
+         StubSym = Alias.first](JITTargetAddress ResolvedAddr) -> Error {
+          return ISManager.updatePointer(*StubSym, ResolvedAddr);
+        });
 
     if (!CallThroughTrampoline) {
       SourceJD.getExecutionSession().reportError(
@@ -168,6 +169,9 @@ void LazyReexportsMaterializationUnit::materialize(
         std::make_pair(*CallThroughTrampoline, Alias.second.AliasFlags);
   }
 
+  if (AliaseeTable != nullptr && !RequestedAliases.empty())
+    AliaseeTable->trackImpls(RequestedAliases, &SourceJD);
+
   if (auto Err = ISManager.createStubs(StubInits)) {
     SourceJD.getExecutionSession().reportError(std::move(Err));
     R.failMaterialization();
@@ -178,8 +182,9 @@ void LazyReexportsMaterializationUnit::materialize(
   for (auto &Alias : RequestedAliases)
     Stubs[Alias.first] = ISManager.findStub(*Alias.first, false);
 
-  R.resolve(Stubs);
-  R.emit();
+  // No registered dependencies, so these calls cannot fail.
+  cantFail(R.notifyResolved(Stubs));
+  cantFail(R.notifyEmitted());
 }
 
 void LazyReexportsMaterializationUnit::discard(const JITDylib &JD,

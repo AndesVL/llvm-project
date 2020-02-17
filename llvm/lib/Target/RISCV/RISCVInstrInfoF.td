@@ -99,7 +99,7 @@ class FPCmpS_rr<bits<3> funct3, string opcodestr>
 // Instructions
 //===----------------------------------------------------------------------===//
 
-let Predicates = [HasStdExtF] in {
+let Predicates = [HasStdExtF, NotCapMode] in {
 let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
 def FLW : RVInstI<0b010, OPC_LOAD_FP, (outs FPR32:$rd),
                   (ins GPR:$rs1, simm12:$imm12),
@@ -112,7 +112,9 @@ let hasSideEffects = 0, mayLoad = 0, mayStore = 1 in
 def FSW : RVInstS<0b010, OPC_STORE_FP, (outs),
                   (ins FPR32:$rs2, GPR:$rs1, simm12:$imm12),
                    "fsw", "$rs2, ${imm12}(${rs1})">;
+} // Predicates = [HasStdExtF, NotCapMode]
 
+let Predicates = [HasStdExtF] in {
 def FMADD_S  : FPFMAS_rrr_frm<OPC_MADD, "fmadd.s">;
 def          : FPFMASDynFrmAlias<FMADD_S, "fmadd.s">;
 def FMSUB_S  : FPFMAS_rrr_frm<OPC_MSUB, "fmsub.s">;
@@ -205,10 +207,12 @@ def           : FPUnaryOpDynFrmAlias<FCVT_S_LU, "fcvt.s.lu", FPR32, GPR>;
 // Assembler Pseudo Instructions (User-Level ISA, Version 2.2, Chapter 20)
 //===----------------------------------------------------------------------===//
 
-let Predicates = [HasStdExtF] in {
+let Predicates = [HasStdExtF, NotCapMode] in {
 def : InstAlias<"flw $rd, (${rs1})",  (FLW FPR32:$rd,  GPR:$rs1, 0), 0>;
 def : InstAlias<"fsw $rs2, (${rs1})", (FSW FPR32:$rs2, GPR:$rs1, 0), 0>;
+} // Predicates = [HasStdExtF, NotCapMode]
 
+let Predicates = [HasStdExtF] in {
 def : InstAlias<"fmv.s $rd, $rs",  (FSGNJ_S  FPR32:$rd, FPR32:$rs, FPR32:$rs)>;
 def : InstAlias<"fabs.s $rd, $rs", (FSGNJX_S FPR32:$rd, FPR32:$rs, FPR32:$rs)>;
 def : InstAlias<"fneg.s $rd, $rs", (FSGNJN_S FPR32:$rd, FPR32:$rs, FPR32:$rs)>;
@@ -222,32 +226,39 @@ def : InstAlias<"fge.s $rd, $rs, $rt",
 
 // The following csr instructions actually alias instructions from the base ISA.
 // However, it only makes sense to support them when the F extension is enabled.
-// CSR Addresses: 0x003 == fcsr, 0x002 == frm, 0x001 == fflags
 // NOTE: "frcsr", "frrm", and "frflags" are more specialized version of "csrr".
-def : InstAlias<"frcsr $rd",      (CSRRS GPR:$rd, 0x003, X0), 2>;
-def : InstAlias<"fscsr $rd, $rs", (CSRRW GPR:$rd, 0x003, GPR:$rs)>;
-def : InstAlias<"fscsr $rs",      (CSRRW      X0, 0x003, GPR:$rs), 2>;
+def : InstAlias<"frcsr $rd",      (CSRRS GPR:$rd, FCSR.Encoding, X0), 2>;
+def : InstAlias<"fscsr $rd, $rs", (CSRRW GPR:$rd, FCSR.Encoding, GPR:$rs)>;
+def : InstAlias<"fscsr $rs",      (CSRRW      X0, FCSR.Encoding, GPR:$rs), 2>;
 
-def : InstAlias<"frrm $rd",        (CSRRS  GPR:$rd, 0x002, X0), 2>;
-def : InstAlias<"fsrm $rd, $rs",   (CSRRW  GPR:$rd, 0x002, GPR:$rs)>;
-def : InstAlias<"fsrm $rs",        (CSRRW       X0, 0x002, GPR:$rs), 2>;
-def : InstAlias<"fsrmi $rd, $imm", (CSRRWI GPR:$rd, 0x002, uimm5:$imm)>;
-def : InstAlias<"fsrmi $imm",      (CSRRWI      X0, 0x002, uimm5:$imm), 2>;
+// frsr, fssr are obsolete aliases replaced by frcsr, fscsr, so give them
+// zero weight.
+def : InstAlias<"frsr $rd",       (CSRRS GPR:$rd, FCSR.Encoding, X0), 0>;
+def : InstAlias<"fssr $rd, $rs",  (CSRRW GPR:$rd, FCSR.Encoding, GPR:$rs), 0>;
+def : InstAlias<"fssr $rs",       (CSRRW      X0, FCSR.Encoding, GPR:$rs), 0>;
 
-def : InstAlias<"frflags $rd",        (CSRRS  GPR:$rd, 0x001, X0), 2>;
-def : InstAlias<"fsflags $rd, $rs",   (CSRRW  GPR:$rd, 0x001, GPR:$rs)>;
-def : InstAlias<"fsflags $rs",        (CSRRW       X0, 0x001, GPR:$rs), 2>;
-def : InstAlias<"fsflagsi $rd, $imm", (CSRRWI GPR:$rd, 0x001, uimm5:$imm)>;
-def : InstAlias<"fsflagsi $imm",      (CSRRWI      X0, 0x001, uimm5:$imm), 2>;
+def : InstAlias<"frrm $rd",        (CSRRS  GPR:$rd, FRM.Encoding, X0), 2>;
+def : InstAlias<"fsrm $rd, $rs",   (CSRRW  GPR:$rd, FRM.Encoding, GPR:$rs)>;
+def : InstAlias<"fsrm $rs",        (CSRRW       X0, FRM.Encoding, GPR:$rs), 2>;
+def : InstAlias<"fsrmi $rd, $imm", (CSRRWI GPR:$rd, FRM.Encoding, uimm5:$imm)>;
+def : InstAlias<"fsrmi $imm",      (CSRRWI      X0, FRM.Encoding, uimm5:$imm), 2>;
+
+def : InstAlias<"frflags $rd",        (CSRRS  GPR:$rd, FFLAGS.Encoding, X0), 2>;
+def : InstAlias<"fsflags $rd, $rs",   (CSRRW  GPR:$rd, FFLAGS.Encoding, GPR:$rs)>;
+def : InstAlias<"fsflags $rs",        (CSRRW       X0, FFLAGS.Encoding, GPR:$rs), 2>;
+def : InstAlias<"fsflagsi $rd, $imm", (CSRRWI GPR:$rd, FFLAGS.Encoding, uimm5:$imm)>;
+def : InstAlias<"fsflagsi $imm",      (CSRRWI      X0, FFLAGS.Encoding, uimm5:$imm), 2>;
 
 // fmv.w.x and fmv.x.w were previously known as fmv.s.x and fmv.x.s. Both
 // spellings should be supported by standard tools.
 def : MnemonicAlias<"fmv.s.x", "fmv.w.x">;
 def : MnemonicAlias<"fmv.x.s", "fmv.x.w">;
+} // Predicates = [HasStdExtF]
 
+let Predicates = [HasStdExtF, NotCapMode] in {
 def PseudoFLW  : PseudoFloatLoad<"flw", FPR32>;
 def PseudoFSW  : PseudoStore<"fsw", FPR32>;
-} // Predicates = [HasStdExtF]
+} // Predicates = [HasStdExtF, NotCapMode]
 
 //===----------------------------------------------------------------------===//
 // Pseudo-instructions and codegen patterns
@@ -335,6 +346,10 @@ def : Pat<(setuo FPR32:$rs1, FPR32:$rs2),
 
 def Select_FPR32_Using_CC_GPR : SelectCC_rrirr<FPR32, GPR>;
 
+} // Predicates = [HasStdExtF]
+
+let Predicates = [HasStdExtF, NotCapMode] in {
+
 /// Loads
 
 defm : LdPat<load, FLW>;
@@ -343,7 +358,7 @@ defm : LdPat<load, FLW>;
 
 defm : StPat<store, FSW, FPR32>;
 
-} // Predicates = [HasStdExtF]
+} // Predicates = [HasStdExtF, NotCapMode]
 
 let Predicates = [HasStdExtF, IsRV32] in {
 // float->[u]int. Round-to-zero must be used.

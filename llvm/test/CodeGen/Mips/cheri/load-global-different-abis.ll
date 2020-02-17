@@ -1,9 +1,9 @@
-; RUN: sed 's/addrspace(200)//' %s | llc -mtriple=mips64-unknown-freebsd -relocation-model=pic -mxgot -o - -show-mc-encoding -print-machineinstrs=expand-isel-pseudos 2>&1 | FileCheck %s -check-prefixes=MIPS,MIPS-MXGOT,COMMON
-; RUN: sed 's/addrspace(200)//' %s | llc -mtriple=mips64-unknown-freebsd -relocation-model=pic -mxgot=false -o - -show-mc-encoding -print-machineinstrs=expand-isel-pseudos 2>&1 | FileCheck %s -check-prefixes=MIPS,MIPS-SMALLGOT,COMMON
-; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=legacy  %s -o - -show-mc-encoding -print-machineinstrs=expand-isel-pseudos 2>&1 | %cheri_FileCheck %s -check-prefixes=LEGACY,COMMON
-; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=plt     %s -o - -show-mc-encoding -print-machineinstrs=expand-isel-pseudos 2>&1 | %cheri_FileCheck %s -check-prefixes=PLT,COMMON
-; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=fn-desc %s -o - -show-mc-encoding -print-machineinstrs=expand-isel-pseudos 2>&1 | %cheri_FileCheck %s -check-prefixes=FNDESC,COMMON
-; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=pcrel   %s -o - -show-mc-encoding -print-machineinstrs=expand-isel-pseudos 2>&1 | %cheri_FileCheck %s -check-prefixes=PCREL,COMMON
+; RUN: sed 's/addrspace(200)//' %s | llc -mtriple=mips64-unknown-freebsd -relocation-model=pic -mattr=+xgot -o - -show-mc-encoding -print-after=finalize-isel 2>&1 | FileCheck %s -check-prefixes=MIPS,MIPS-MXGOT,COMMON
+; RUN: sed 's/addrspace(200)//' %s | llc -mtriple=mips64-unknown-freebsd -relocation-model=pic -mattr=-xgot -o - -show-mc-encoding -print-after=finalize-isel 2>&1 | FileCheck %s -check-prefixes=MIPS,MIPS-SMALLGOT,COMMON
+; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=legacy  %s -o - -show-mc-encoding -print-after=finalize-isel 2>&1 | %cheri_FileCheck %s -check-prefixes=LEGACY,COMMON
+; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=plt     %s -o - -show-mc-encoding -print-after=finalize-isel 2>&1 | %cheri_FileCheck %s -check-prefixes=PLT,COMMON
+; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=fn-desc %s -o - -show-mc-encoding -print-after=finalize-isel 2>&1 | %cheri_FileCheck %s -check-prefixes=FNDESC,COMMON
+; RUN: %cheri_purecap_llc -verify-machineinstrs -cheri-cap-table-abi=pcrel   %s -o - -show-mc-encoding -print-after=finalize-isel 2>&1 | %cheri_FileCheck %s -check-prefixes=PCREL,COMMON
 
 target triple = "cheri-unknown-freebsd"
 
@@ -19,16 +19,12 @@ entry:
 }
 ; COMMON-LABEL: Machine code for function test:
 ; MIPS:   Function Live Ins: $t9_64
-; Legacy gets the GOT via $c12 (->$t9_64)
-; LEGACY: Function Live Ins: $c12
 ; PLT and FNDESC modes both expect $c26 to be live-in
 ; PLT: Function Live Ins: $c26
 ; FNDESC: Function Live Ins: $c26
-; However, PCREL derives it from $pcc so only needs $c12
-; PCREL: Function Live Ins: $c12
+
 
 ; COMMON-LABEL: bb.0.entry:
-
 
 ; MIPS-NEXT: liveins: $t9_64
 ; MIPS-NEXT: %{{5|3}}:gpr64 = LUi64 target-flags(mips-gpoff-hi) @test
@@ -44,7 +40,8 @@ entry:
 ; Legacy loads the vaddr of global from the got then loads .size.global and
 ; does a cfromptr + csetbounds with those two values:
 ; LEGACY-NEXT:   liveins: $c12
-; LEGACY-NEXT:   $t9_64 = CGetOffset $c12
+; LEGACY-NEXT:   %13:cherigpr = COPY $c12
+; LEGACY-NEXT:   $t9_64 = CGetOffset %13:cherigpr
 ; LEGACY-NEXT:   %11:gpr64 = LUi64 target-flags(mips-gpoff-hi) @test
 ; LEGACY-NEXT:   %12:gpr64 = DADDu %11:gpr64, $t9_64
 ; LEGACY-NEXT:   %0:gpr64 = DADDiu %12:gpr64, target-flags(mips-gpoff-lo) @test
@@ -72,12 +69,9 @@ entry:
 ; FNDESC-NEXT:  %1:cherigpr = LOADCAP_BigImm target-flags(mips-captable20) @global, %0:cherigpr :: (load [[#CAP_SIZE]] from cap-table)
 ; FNDESC-NEXT:  [[RESULT:%2]]:gpr64 = CAPLOAD64 $zero_64, 0, killed %1:cherigpr :: (dereferenceable load 8 from @global, addrspace 200)
 
-; PCREL-NEXT: liveins: $c12
-; PCREL-NEXT: %1:gpr64 = LUi64 target-flags(mips-captable-off-hi) @test
-; PCREL-NEXT: %2:gpr64 = DADDiu %1:gpr64, target-flags(mips-captable-off-lo) @test
-; PCREL-NEXT: %0:cherigpr = CIncOffset $c12, %2:gpr64
-; PCREL-NEXT: %3:cherigpr = LOADCAP_BigImm target-flags(mips-captable20) @global, %0:cherigpr :: (load [[#CAP_SIZE]] from cap-table)
-; PCREL-NEXT: [[RESULT:%([0-9]+)]]:gpr64 = CAPLOAD64 $zero_64, 0, killed %3:cherigpr :: (dereferenceable load 8 from @global, addrspace 200)
+; PCREL-NEXT: [[CAPTABLE:%.+:cherigpr]] = PseudoPccRelativeAddressPostRA &_CHERI_CAPABILITY_TABLE_, implicit-def dead early-clobber %1:gpr64
+; PCREL-NEXT: [[GLOBAL_CAP:%.+:cherigpr]] = LOADCAP_BigImm target-flags(mips-captable20) @global, [[CAPTABLE]] :: (load [[#CAP_SIZE]] from cap-table)
+; PCREL-NEXT: [[RESULT:%([0-9]+)]]:gpr64 = CAPLOAD64 $zero_64, 0, killed [[GLOBAL_CAP]] :: (dereferenceable load 8 from @global, addrspace 200)
 
 
 ; COMMON-NEXT:   $v0_64 = COPY [[RESULT]]
@@ -88,7 +82,7 @@ entry:
 
 ; COMMON: .text
 ; COMMON: test:
-; COMMON-LABEL: # %bb.0:
+; COMMON-LABEL: # %bb.0
 
 
 ; MIPS-NEXT: lui	$1, %hi(%neg(%gp_rel(test))) # encoding: [0x3c,0x01,A,A]
@@ -134,11 +128,11 @@ entry:
 ; FNDESC-NEXT:	cld	$2, $zero, 0($c1)
 
 
-; PCREL-NEXT: lui	$1, %hi(%neg(%captab_rel(test))) # encoding: [0x3c,0x01,A,A]
-; PCREL-NEXT:         #   fixup A - offset: 0, value: %hi(%neg(%captab_rel(test))), kind:
-; PCREL-NEXT: daddiu	$1, $1, %lo(%neg(%captab_rel(test))) # encoding: [0x64,0x21,A,A]
-; PCREL-NEXT:                 #   fixup A - offset: 0, value: %lo(%neg(%captab_rel(test))), kind:
-; PCREL-NEXT: cincoffset	$[[CGP:c1]], $c12, $1
+; PCREL-NEXT: lui	$1, %pcrel_hi(_CHERI_CAPABILITY_TABLE_-8) # encoding: [0x3c,0x01,A,A]
+; PCREL-NEXT:         #   fixup A - offset: 0, value: %pcrel_hi(_CHERI_CAPABILITY_TABLE_-8), kind:
+; PCREL-NEXT: daddiu	$1, $1, %pcrel_lo(_CHERI_CAPABILITY_TABLE_-4) # encoding: [0x64,0x21,A,A]
+; PCREL-NEXT:                 #   fixup A - offset: 0, value: %pcrel_lo(_CHERI_CAPABILITY_TABLE_-4), kind:
+; PCREL-NEXT: cgetpccincoffset	$[[CGP:c1]], $1
 ; PCREL-NEXT: clcbi	$c1, %captab20(global)($[[CGP]]) # encoding: [0x74,0x21,A,A]
 ; PCREL-NEXT:            #   fixup A - offset: 0, value: %captab20(global), kind: fixup_CHERI_CAPTABLE20
 ; PCREL-NEXT: cjr	$c17

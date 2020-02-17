@@ -60,11 +60,6 @@ static cl::opt<bool>
     GPOpt("mgpopt", cl::Hidden,
           cl::desc("Enable gp-relative addressing of mips small data items"));
 
-static cl::opt<bool> CheriExactEqualsOpt(
-    "cheri-exact-equals",
-    cl::desc("CHERI: Capability equality comparisons are exact."),
-    cl::init(false));
-
 bool MipsSubtarget::DspWarningPrinted = false;
 bool MipsSubtarget::MSAWarningPrinted = false;
 bool MipsSubtarget::VirtWarningPrinted = false;
@@ -75,23 +70,26 @@ void MipsSubtarget::anchor() {}
 
 MipsSubtarget::MipsSubtarget(const Triple &TT, StringRef CPU, StringRef FS,
                              bool little, const MipsTargetMachine &TM,
-                             unsigned StackAlignOverride)
+                             MaybeAlign StackAlignOverride)
     : MipsGenSubtargetInfo(TT, CPU, FS), MipsArchVersion(MipsDefault),
       IsLittle(little), IsSoftFloat(false), IsSingleFloat(false), IsFPXX(false),
       NoABICalls(false), Abs2008(false), IsFP64bit(false), UseOddSPReg(true),
       IsNaN2008bit(false), IsGP64bit(false), HasVFPU(false), HasCnMips(false),
-      HasMips3_32(false), HasMips3_32r2(false), HasMips4_32(false),
-      HasMips4_32r2(false), HasMips5_32r2(false), IsCheri64(false),
-      IsCheri128(false), IsCheri256(false), IsCheri(false), IsBeri(false),
-      UseCheriExactEquals(CheriExactEqualsOpt), InMips16Mode(false),
-      InMips16HardFloat(Mips16HardFloat), InMicroMipsMode(false), HasDSP(false),
-      HasDSPR2(false), HasDSPR3(false), AllowMixed16_32(Mixed16_32 | Mips_Os16),
-      Os16(Mips_Os16), HasMSA(false), UseTCCInDIV(false), HasSym32(false),
-      HasEVA(false), DisableMadd4(false), HasMT(false), HasCRC(false),
-      HasVirt(false), HasGINV(false), UseIndirectJumpsHazard(false),
-      StackAlignOverride(StackAlignOverride), TM(TM), TargetTriple(TT),
-      TSInfo(), InstrInfo(MipsInstrInfo::create(
-                    initializeSubtargetDependencies(CPU, FS, TM))),
+      HasCnMipsP(false), HasMips3_32(false), HasMips3_32r2(false),
+      HasMips4_32(false), HasMips4_32r2(false), HasMips5_32r2(false),
+
+      IsCheri64(false), IsCheri128(false), IsCheri256(false), IsCheri(false),
+      IsBeri(false), UseCheriExactEquals(false),
+
+      InMips16Mode(false), InMips16HardFloat(Mips16HardFloat),
+      InMicroMipsMode(false), HasDSP(false), HasDSPR2(false), HasDSPR3(false),
+      AllowMixed16_32(Mixed16_32 | Mips_Os16), Os16(Mips_Os16), HasMSA(false),
+      UseTCCInDIV(false), HasSym32(false), HasEVA(false), DisableMadd4(false),
+      HasMT(false), HasCRC(false), HasVirt(false), HasGINV(false),
+      UseIndirectJumpsHazard(false), StackAlignOverride(StackAlignOverride),
+      TM(TM), TargetTriple(TT), TSInfo(),
+      InstrInfo(
+          MipsInstrInfo::create(initializeSubtargetDependencies(CPU, FS, TM))),
       FrameLowering(MipsFrameLowering::create(*this)),
       TLInfo(MipsTargetLowering::create(TM, *this)) {
 
@@ -114,6 +112,11 @@ MipsSubtarget::MipsSubtarget(const Triple &TT, StringRef CPU, StringRef FS,
     report_fatal_error("MSA requires a 64-bit FPU register file (FR=1 mode). "
                        "See -mattr=+fp64.",
                        false);
+
+  if (isFP64bit() && !hasMips64() && hasMips32() && !hasMips32r2())
+    report_fatal_error(
+        "FPU with 64-bit registers is not available on MIPS32 pre revision 2. "
+        "Use -mcpu=mips32r2 or greater.");
 
   if (!isABI_O32() && !useOddSPReg())
     report_fatal_error("-mattr=+nooddspreg requires the O32 ABI.", false);
@@ -265,18 +268,22 @@ MipsSubtarget::initializeSubtargetDependencies(StringRef CPU, StringRef FS,
     InMips16HardFloat = true;
 
   if (StackAlignOverride)
-    stackAlignment = StackAlignOverride;
+    stackAlignment = *StackAlignOverride;
   else if (isCheri()) {
-    if (isCheri128())
-      stackAlignment = 16;
+    if (isCheri256())
+      stackAlignment = Align(32);
     else
-      stackAlignment = 32;
+      stackAlignment = Align(16);
   } else if (isABI_N32() || isABI_N64())
-    stackAlignment = 16;
+    stackAlignment = Align(16);
   else {
     assert(isABI_O32() && "Unknown ABI for stack alignment!");
-    stackAlignment = 8;
+    stackAlignment = Align(8);
   }
+
+  if ((isABI_N32() || isABI_N64()) && !isGP64bit())
+    report_fatal_error("64-bit code requested on a subtarget that doesn't "
+                       "support it!");
 
   return *this;
 }
@@ -330,6 +337,6 @@ void MipsSubtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
 #endif
 }
 
-const InstructionSelector *MipsSubtarget::getInstructionSelector() const {
+InstructionSelector *MipsSubtarget::getInstructionSelector() const {
   return InstSelector.get();
 }

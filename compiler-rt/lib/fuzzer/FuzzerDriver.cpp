@@ -182,7 +182,8 @@ static bool ParseOneFlag(const char *Param) {
 }
 
 // We don't use any library to minimize dependencies.
-static void ParseFlags(const Vector<std::string> &Args) {
+static void ParseFlags(const Vector<std::string> &Args,
+                       const ExternalFunctions *EF) {
   for (size_t F = 0; F < kNumFlags; F++) {
     if (FlagDescriptions[F].IntFlag)
       *FlagDescriptions[F].IntFlag = FlagDescriptions[F].Default;
@@ -192,6 +193,11 @@ static void ParseFlags(const Vector<std::string> &Args) {
     if (FlagDescriptions[F].StrFlag)
       *FlagDescriptions[F].StrFlag = nullptr;
   }
+
+  // Disable len_control by default, if LLVMFuzzerCustomMutator is used.
+  if (EF->LLVMFuzzerCustomMutator)
+    Flags.len_control = 0;
+
   Inputs = new Vector<std::string>;
   for (size_t A = 1; A < Args.size(); A++) {
     if (ParseOneFlag(Args[A].c_str())) {
@@ -274,7 +280,8 @@ static void RssThread(Fuzzer *F, size_t RssLimitMb) {
 }
 
 static void StartRssThread(Fuzzer *F, size_t RssLimitMb) {
-  if (!RssLimitMb) return;
+  if (!RssLimitMb)
+    return;
   std::thread T(RssThread, F, RssLimitMb);
   T.detach();
 }
@@ -616,7 +623,7 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
     Printf("ERROR: argv[0] has been modified in LLVMFuzzerInitialize\n");
     exit(1);
   }
-  ParseFlags(Args);
+  ParseFlags(Args, EF);
   if (Flags.help) {
     PrintHelp();
     return 0;
@@ -702,7 +709,8 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
     Options.FeaturesDir = Flags.features_dir;
   if (Flags.collect_data_flow)
     Options.CollectDataFlow = Flags.collect_data_flow;
-  Options.LazyCounters = Flags.lazy_counters;
+  if (Flags.stop_file)
+    Options.StopFile = Flags.stop_file;
 
   unsigned Seed = Flags.seed;
   // Initialize Seed.
@@ -730,7 +738,11 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
     if (U.size() <= Word::GetMaxSize())
       MD->AddWordToManualDictionary(Word(U.data(), U.size()));
 
+      // Threads are only supported by Chrome. Don't use them with emscripten
+      // for now.
+#if !LIBFUZZER_EMSCRIPTEN
   StartRssThread(F, Flags.rss_limit_mb);
+#endif // LIBFUZZER_EMSCRIPTEN
 
   Options.HandleAbrt = Flags.handle_abrt;
   Options.HandleBus = Flags.handle_bus;

@@ -16,6 +16,7 @@
 #include "clang/AST/ASTDiagnostic.h"
 #include "clang/AST/ASTLambda.h"
 #include "clang/AST/ASTMutationListener.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/CanonicalType.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclCXX.h"
@@ -55,8 +56,8 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -901,6 +902,10 @@ LinkageComputer::getLVForNamespaceScopeDecl(const NamedDecl *D,
   if (!isExternallyVisible(LV.getLinkage()))
     return LinkageInfo(LV.getLinkage(), DefaultVisibility, false);
 
+  // Mark the symbols as hidden when compiling for the device.
+  if (Context.getLangOpts().OpenMP && Context.getLangOpts().OpenMPIsDevice)
+    LV.mergeVisibility(HiddenVisibility, /*newExplicit=*/false);
+
   return LV;
 }
 
@@ -1385,7 +1390,8 @@ LinkageInfo LinkageComputer::computeLVForDecl(const NamedDecl *D,
     case Decl::CXXRecord: {
       const auto *Record = cast<CXXRecordDecl>(D);
       if (Record->isLambda()) {
-        if (!Record->getLambdaManglingNumber()) {
+        if (Record->hasKnownLambdaInternalLinkage() ||
+            !Record->getLambdaManglingNumber()) {
           // This lambda has no mangling number, so it's internal.
           return getInternalLinkageFor(D);
         }
@@ -1402,7 +1408,8 @@ LinkageInfo LinkageComputer::computeLVForDecl(const NamedDecl *D,
         //  };
         const CXXRecordDecl *OuterMostLambda =
             getOutermostEnclosingLambda(Record);
-        if (!OuterMostLambda->getLambdaManglingNumber())
+        if (OuterMostLambda->hasKnownLambdaInternalLinkage() ||
+            !OuterMostLambda->getLambdaManglingNumber())
           return getInternalLinkageFor(D);
 
         return getLVForClosure(
@@ -1558,6 +1565,24 @@ void NamedDecl::printQualifiedName(raw_ostream &OS) const {
 
 void NamedDecl::printQualifiedName(raw_ostream &OS,
                                    const PrintingPolicy &P) const {
+  if (getDeclContext()->isFunctionOrMethod()) {
+    // We do not print '(anonymous)' for function parameters without name.
+    printName(OS);
+    return;
+  }
+  printNestedNameSpecifier(OS, P);
+  if (getDeclName() || isa<DecompositionDecl>(this))
+    OS << *this;
+  else
+    OS << "(anonymous)";
+}
+
+void NamedDecl::printNestedNameSpecifier(raw_ostream &OS) const {
+  printNestedNameSpecifier(OS, getASTContext().getPrintingPolicy());
+}
+
+void NamedDecl::printNestedNameSpecifier(raw_ostream &OS,
+                                         const PrintingPolicy &P) const {
   const DeclContext *Ctx = getDeclContext();
 
   // For ObjC methods and properties, look through categories and use the
@@ -1571,10 +1596,8 @@ void NamedDecl::printQualifiedName(raw_ostream &OS,
         Ctx = ID;
   }
 
-  if (Ctx->isFunctionOrMethod()) {
-    printName(OS);
+  if (Ctx->isFunctionOrMethod())
     return;
-  }
 
   using ContextsTy = SmallVector<const DeclContext *, 8>;
   ContextsTy Contexts;
@@ -1644,11 +1667,6 @@ void NamedDecl::printQualifiedName(raw_ostream &OS,
     }
     OS << "::";
   }
-
-  if (getDeclName() || isa<DecompositionDecl>(this))
-    OS << *this;
-  else
-    OS << "(anonymous)";
 }
 
 void NamedDecl::getNameForDiagnostic(raw_ostream &OS,
@@ -1802,6 +1820,12 @@ SourceLocation DeclaratorDecl::getTypeSpecStartLoc() const {
   return SourceLocation();
 }
 
+SourceLocation DeclaratorDecl::getTypeSpecEndLoc() const {
+  TypeSourceInfo *TSI = getTypeSourceInfo();
+  if (TSI) return TSI->getTypeLoc().getEndLoc();
+  return SourceLocation();
+}
+
 void DeclaratorDecl::setQualifierInfo(NestedNameSpecifierLoc QualifierLoc) {
   if (QualifierLoc) {
     // Make sure the extended decl info is allocated.
@@ -1815,21 +1839,25 @@ void DeclaratorDecl::setQualifierInfo(NestedNameSpecifierLoc QualifierLoc) {
     }
     // Set qualifier info.
     getExtInfo()->QualifierLoc = QualifierLoc;
-  } else {
+  } else if (hasExtInfo()) {
     // Here Qualifier == 0, i.e., we are removing the qualifier (if any).
-    if (hasExtInfo()) {
-      if (getExtInfo()->NumTemplParamLists == 0) {
-        // Save type source info pointer.
-        TypeSourceInfo *savedTInfo = getExtInfo()->TInfo;
-        // Deallocate the extended decl info.
-        getASTContext().Deallocate(getExtInfo());
-        // Restore savedTInfo into (non-extended) decl info.
-        DeclInfo = savedTInfo;
-      }
-      else
-        getExtInfo()->QualifierLoc = QualifierLoc;
-    }
+    getExtInfo()->QualifierLoc = QualifierLoc;
   }
+}
+
+void DeclaratorDecl::setTrailingRequiresClause(Expr *TrailingRequiresClause) {
+  assert(TrailingRequiresClause);
+  // Make sure the extended decl info is allocated.
+  if (!hasExtInfo()) {
+    // Save (non-extended) type source info pointer.
+    auto *savedTInfo = DeclInfo.get<TypeSourceInfo*>();
+    // Allocate external info struct.
+    DeclInfo = new (getASTContext()) ExtInfo;
+    // Restore savedTInfo into (extended) decl info.
+    getExtInfo()->TInfo = savedTInfo;
+  }
+  // Set requires clause info.
+  getExtInfo()->TrailingRequiresClause = TrailingRequiresClause;
 }
 
 void DeclaratorDecl::setTemplateParameterListsInfo(
@@ -2220,6 +2248,22 @@ Stmt **VarDecl::getInitAddress() {
   return Init.getAddrOfPtr1();
 }
 
+VarDecl *VarDecl::getInitializingDeclaration() {
+  VarDecl *Def = nullptr;
+  for (auto I : redecls()) {
+    if (I->hasInit())
+      return I;
+
+    if (I->isThisDeclarationADefinition()) {
+      if (isStaticDataMember())
+        return I;
+      else
+        Def = I;
+    }
+  }
+  return Def;
+}
+
 bool VarDecl::isOutOfLine() const {
   if (Decl::isOutOfLine())
     return true;
@@ -2282,7 +2326,7 @@ bool VarDecl::isUsableInConstantExpressions(ASTContext &Context) const {
   //   declaration is encountered...
   const VarDecl *DefVD = nullptr;
   const Expr *Init = getAnyInitializer(DefVD);
-  if (!Init || Init->isValueDependent())
+  if (!Init || Init->isValueDependent() || getType()->isDependentType())
     return false;
   //   ... if it is a constexpr variable, or it is of reference type or of
   //   const-qualified integral or enumeration type, ...
@@ -2569,6 +2613,18 @@ bool VarDecl::isNoDestroy(const ASTContext &Ctx) const {
                                  !hasAttr<AlwaysDestroyAttr>()));
 }
 
+QualType::DestructionKind
+VarDecl::needsDestruction(const ASTContext &Ctx) const {
+  if (EvaluatedStmt *Eval = Init.dyn_cast<EvaluatedStmt *>())
+    if (Eval->HasConstantDestruction)
+      return QualType::DK_none;
+
+  if (isNoDestroy(Ctx))
+    return QualType::DK_none;
+
+  return getType().isDestructedType();
+}
+
 MemberSpecializationInfo *VarDecl::getMemberSpecializationInfo() const {
   if (isStaticDataMember())
     // FIXME: Remove ?
@@ -2728,10 +2784,12 @@ FunctionDecl::FunctionDecl(Kind DK, ASTContext &C, DeclContext *DC,
                            SourceLocation StartLoc,
                            const DeclarationNameInfo &NameInfo, QualType T,
                            TypeSourceInfo *TInfo, StorageClass S,
-                           bool isInlineSpecified, bool isConstexprSpecified)
+                           bool isInlineSpecified,
+                           ConstexprSpecKind ConstexprKind,
+                           Expr *TrailingRequiresClause)
     : DeclaratorDecl(DK, DC, NameInfo.getLoc(), NameInfo.getName(), T, TInfo,
                      StartLoc),
-      DeclContext(DK), redeclarable_base(C), ODRHash(0),
+      DeclContext(DK), redeclarable_base(C), Body(), ODRHash(0),
       EndRangeLoc(NameInfo.getEndLoc()), DNLoc(NameInfo.getInfo()) {
   assert(T.isNull() || T->isFunctionType());
   FunctionDeclBits.SClass = S;
@@ -2746,16 +2804,20 @@ FunctionDecl::FunctionDecl(Kind DK, ASTContext &C, DeclContext *DC,
   FunctionDeclBits.IsTrivialForCall = false;
   FunctionDeclBits.IsDefaulted = false;
   FunctionDeclBits.IsExplicitlyDefaulted = false;
+  FunctionDeclBits.HasDefaultedFunctionInfo = false;
   FunctionDeclBits.HasImplicitReturnZero = false;
   FunctionDeclBits.IsLateTemplateParsed = false;
-  FunctionDeclBits.IsConstexpr = isConstexprSpecified;
+  FunctionDeclBits.ConstexprKind = ConstexprKind;
   FunctionDeclBits.InstantiationIsPending = false;
   FunctionDeclBits.UsesSEHTry = false;
+  FunctionDeclBits.UsesFPIntrin = false;
   FunctionDeclBits.HasSkippedBody = false;
   FunctionDeclBits.WillHaveBody = false;
   FunctionDeclBits.IsMultiVersion = false;
   FunctionDeclBits.IsCopyDeductionCandidate = false;
   FunctionDeclBits.HasODRHash = false;
+  if (TrailingRequiresClause)
+    setTrailingRequiresClause(TrailingRequiresClause);
 }
 
 void FunctionDecl::getNameForDiagnostic(
@@ -2772,6 +2834,32 @@ bool FunctionDecl::isVariadic() const {
   return false;
 }
 
+FunctionDecl::DefaultedFunctionInfo *
+FunctionDecl::DefaultedFunctionInfo::Create(ASTContext &Context,
+                                            ArrayRef<DeclAccessPair> Lookups) {
+  DefaultedFunctionInfo *Info = new (Context.Allocate(
+      totalSizeToAlloc<DeclAccessPair>(Lookups.size()),
+      std::max(alignof(DefaultedFunctionInfo), alignof(DeclAccessPair))))
+      DefaultedFunctionInfo;
+  Info->NumLookups = Lookups.size();
+  std::uninitialized_copy(Lookups.begin(), Lookups.end(),
+                          Info->getTrailingObjects<DeclAccessPair>());
+  return Info;
+}
+
+void FunctionDecl::setDefaultedFunctionInfo(DefaultedFunctionInfo *Info) {
+  assert(!FunctionDeclBits.HasDefaultedFunctionInfo && "already have this");
+  assert(!Body && "can't replace function body with defaulted function info");
+
+  FunctionDeclBits.HasDefaultedFunctionInfo = true;
+  DefaultedInfo = Info;
+}
+
+FunctionDecl::DefaultedFunctionInfo *
+FunctionDecl::getDefaultedFunctionInfo() const {
+  return FunctionDeclBits.HasDefaultedFunctionInfo ? DefaultedInfo : nullptr;
+}
+
 bool FunctionDecl::hasBody(const FunctionDecl *&Definition) const {
   for (auto I : redecls()) {
     if (I->doesThisDeclarationHaveABody()) {
@@ -2783,8 +2871,7 @@ bool FunctionDecl::hasBody(const FunctionDecl *&Definition) const {
   return false;
 }
 
-bool FunctionDecl::hasTrivialBody() const
-{
+bool FunctionDecl::hasTrivialBody() const {
   Stmt *S = getBody();
   if (!S) {
     // Since we don't have a body for this function, we don't know if it's
@@ -2812,6 +2899,8 @@ Stmt *FunctionDecl::getBody(const FunctionDecl *&Definition) const {
   if (!hasBody(Definition))
     return nullptr;
 
+  assert(!Definition->FunctionDeclBits.HasDefaultedFunctionInfo &&
+         "definition should not have a body");
   if (Definition->Body)
     return Definition->Body.get(getASTContext().getExternalSource());
 
@@ -2819,7 +2908,8 @@ Stmt *FunctionDecl::getBody(const FunctionDecl *&Definition) const {
 }
 
 void FunctionDecl::setBody(Stmt *B) {
-  Body = B;
+  FunctionDeclBits.HasDefaultedFunctionInfo = false;
+  Body = LazyDeclStmtPtr(B);
   if (B)
     EndRangeLoc = B->getEndLoc();
 }
@@ -2953,12 +3043,19 @@ bool FunctionDecl::isReplaceableGlobalAllocationFunction(bool *IsAligned) const 
     Ty = Ty->getPointeeType();
     if (Ty.getCVRQualifiers() != Qualifiers::Const)
       return false;
-    const CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
-    if (RD && isNamed(RD, "nothrow_t") && RD->isInStdNamespace())
+    if (Ty->isNothrowT())
       Consume();
   }
 
   return Params == FPT->getNumParams();
+}
+
+bool FunctionDecl::isInlineBuiltinDeclaration() const {
+  if (!getBuiltinID())
+    return false;
+
+  const FunctionDecl *Definition;
+  return hasBody(Definition) && Definition->isInlineSpecified();
 }
 
 bool FunctionDecl::isDestroyingOperatorDelete() const {
@@ -3078,10 +3175,17 @@ FunctionDecl *FunctionDecl::getCanonicalDecl() { return getFirstDecl(); }
 /// functions as their wrapped builtins. This shouldn't be done in general, but
 /// it's useful in Sema to diagnose calls to wrappers based on their semantics.
 unsigned FunctionDecl::getBuiltinID(bool ConsiderWrapperFunctions) const {
-  if (!getIdentifier())
-    return 0;
+  unsigned BuiltinID;
 
-  unsigned BuiltinID = getIdentifier()->getBuiltinID();
+  if (const auto *AMAA = getAttr<ArmMveAliasAttr>()) {
+    BuiltinID = AMAA->getBuiltinName()->getBuiltinID();
+  } else {
+    if (!getIdentifier())
+      return 0;
+
+    BuiltinID = getIdentifier()->getBuiltinID();
+  }
+
   if (!BuiltinID)
     return 0;
 
@@ -3105,7 +3209,8 @@ unsigned FunctionDecl::getBuiltinID(bool ConsiderWrapperFunctions) const {
 
   // If the function is marked "overloadable", it has a different mangled name
   // and is not the C library function.
-  if (!ConsiderWrapperFunctions && hasAttr<OverloadableAttr>())
+  if (!ConsiderWrapperFunctions && hasAttr<OverloadableAttr>() &&
+      !hasAttr<ArmMveAliasAttr>())
     return 0;
 
   if (!Context.BuiltinInfo.isPredefinedLibFunction(BuiltinID))
@@ -3238,6 +3343,9 @@ bool FunctionDecl::doesDeclarationForceExternallyVisibleDefinition() const {
       return true;
   }
 
+  if (Context.getLangOpts().CPlusPlus)
+    return false;
+
   if (Context.getLangOpts().GNUInline || hasAttr<GNUInlineAttr>()) {
     // With GNU inlining, a declaration with 'inline' but not 'extern', forces
     // an externally visible definition.
@@ -3250,9 +3358,9 @@ bool FunctionDecl::doesDeclarationForceExternallyVisibleDefinition() const {
     const FunctionDecl *Prev = this;
     bool FoundBody = false;
     while ((Prev = Prev->getPreviousDecl())) {
-      FoundBody |= Prev->Body.isValid();
+      FoundBody |= Prev->doesThisDeclarationHaveABody();
 
-      if (Prev->Body) {
+      if (Prev->doesThisDeclarationHaveABody()) {
         // If it's not the case that both 'inline' and 'extern' are
         // specified on the definition, then it is always externally visible.
         if (!Prev->isInlineSpecified() ||
@@ -3266,9 +3374,6 @@ bool FunctionDecl::doesDeclarationForceExternallyVisibleDefinition() const {
     return FoundBody;
   }
 
-  if (Context.getLangOpts().CPlusPlus)
-    return false;
-
   // C99 6.7.4p6:
   //   [...] If all of the file scope declarations for a function in a
   //   translation unit include the inline function specifier without extern,
@@ -3278,19 +3383,21 @@ bool FunctionDecl::doesDeclarationForceExternallyVisibleDefinition() const {
   const FunctionDecl *Prev = this;
   bool FoundBody = false;
   while ((Prev = Prev->getPreviousDecl())) {
-    FoundBody |= Prev->Body.isValid();
+    FoundBody |= Prev->doesThisDeclarationHaveABody();
     if (RedeclForcesDefC99(Prev))
       return false;
   }
   return FoundBody;
 }
 
-SourceRange FunctionDecl::getReturnTypeSourceRange() const {
+FunctionTypeLoc FunctionDecl::getFunctionTypeLoc() const {
   const TypeSourceInfo *TSI = getTypeSourceInfo();
-  if (!TSI)
-    return SourceRange();
-  FunctionTypeLoc FTL =
-      TSI->getTypeLoc().IgnoreParens().getAs<FunctionTypeLoc>();
+  return TSI ? TSI->getTypeLoc().IgnoreParens().getAs<FunctionTypeLoc>()
+             : FunctionTypeLoc();
+}
+
+SourceRange FunctionDecl::getReturnTypeSourceRange() const {
+  FunctionTypeLoc FTL = getFunctionTypeLoc();
   if (!FTL)
     return SourceRange();
 
@@ -3305,16 +3412,25 @@ SourceRange FunctionDecl::getReturnTypeSourceRange() const {
   return RTRange;
 }
 
-SourceRange FunctionDecl::getExceptionSpecSourceRange() const {
-  const TypeSourceInfo *TSI = getTypeSourceInfo();
-  if (!TSI)
-    return SourceRange();
-  FunctionTypeLoc FTL =
-    TSI->getTypeLoc().IgnoreParens().getAs<FunctionTypeLoc>();
-  if (!FTL)
+SourceRange FunctionDecl::getParametersSourceRange() const {
+  unsigned NP = getNumParams();
+  SourceLocation EllipsisLoc = getEllipsisLoc();
+
+  if (NP == 0 && EllipsisLoc.isInvalid())
     return SourceRange();
 
-  return FTL.getExceptionSpecRange();
+  SourceLocation Begin =
+      NP > 0 ? ParamInfo[0]->getSourceRange().getBegin() : EllipsisLoc;
+  SourceLocation End = EllipsisLoc.isValid()
+                           ? EllipsisLoc
+                           : ParamInfo[NP - 1]->getSourceRange().getEnd();
+
+  return SourceRange(Begin, End);
+}
+
+SourceRange FunctionDecl::getExceptionSpecSourceRange() const {
+  FunctionTypeLoc FTL = getFunctionTypeLoc();
+  return FTL ? FTL.getExceptionSpecRange() : SourceRange();
 }
 
 /// For an inline function definition in C, or for a gnu_inline function
@@ -3335,7 +3451,8 @@ SourceRange FunctionDecl::getExceptionSpecSourceRange() const {
 /// an externally visible symbol, but "extern inline" will not create an
 /// externally visible symbol.
 bool FunctionDecl::isInlineDefinitionExternallyVisible() const {
-  assert((doesThisDeclarationHaveABody() || willHaveBody()) &&
+  assert((doesThisDeclarationHaveABody() || willHaveBody() ||
+          hasAttr<AliasAttr>()) &&
          "Must be a function definition");
   assert(isInlined() && "Function must be inline");
   ASTContext &Context = getASTContext();
@@ -3347,6 +3464,8 @@ bool FunctionDecl::isInlineDefinitionExternallyVisible() const {
     // If it's not the case that both 'inline' and 'extern' are
     // specified on the definition, then this inline definition is
     // externally visible.
+    if (Context.getLangOpts().CPlusPlus)
+      return false;
     if (!(isInlineSpecified() && getStorageClass() == SC_Extern))
       return true;
 
@@ -3772,6 +3891,11 @@ unsigned FunctionDecl::getMemoryFunctionKind() const {
   case Builtin::BImemcpy:
     return Builtin::BImemcpy;
 
+  case Builtin::BI__builtin_mempcpy:
+  case Builtin::BI__builtin___mempcpy_chk:
+  case Builtin::BImempcpy:
+    return Builtin::BImempcpy;
+
   case Builtin::BI__builtin_memmove:
   case Builtin::BI__builtin___memmove_chk:
   case Builtin::BImemmove:
@@ -3829,6 +3953,8 @@ unsigned FunctionDecl::getMemoryFunctionKind() const {
         return Builtin::BImemset;
       else if (FnInfo->isStr("memcpy"))
         return Builtin::BImemcpy;
+      else if (FnInfo->isStr("mempcpy"))
+        return Builtin::BImempcpy;
       else if (FnInfo->isStr("memmove"))
         return Builtin::BImemmove;
       else if (FnInfo->isStr("memcmp"))
@@ -3914,6 +4040,39 @@ unsigned FieldDecl::getBitWidthValue(const ASTContext &Ctx) const {
 bool FieldDecl::isZeroLengthBitField(const ASTContext &Ctx) const {
   return isUnnamedBitfield() && !getBitWidth()->isValueDependent() &&
          getBitWidthValue(Ctx) == 0;
+}
+
+bool FieldDecl::isZeroSize(const ASTContext &Ctx) const {
+  if (isZeroLengthBitField(Ctx))
+    return true;
+
+  // C++2a [intro.object]p7:
+  //   An object has nonzero size if it
+  //     -- is not a potentially-overlapping subobject, or
+  if (!hasAttr<NoUniqueAddressAttr>())
+    return false;
+
+  //     -- is not of class type, or
+  const auto *RT = getType()->getAs<RecordType>();
+  if (!RT)
+    return false;
+  const RecordDecl *RD = RT->getDecl()->getDefinition();
+  if (!RD) {
+    assert(isInvalidDecl() && "valid field has incomplete type");
+    return false;
+  }
+
+  //     -- [has] virtual member functions or virtual base classes, or
+  //     -- has subobjects of nonzero size or bit-fields of nonzero length
+  const auto *CXXRD = cast<CXXRecordDecl>(RD);
+  if (!CXXRD->isEmpty())
+    return false;
+
+  // Otherwise, [...] the circumstances under which the object has zero size
+  // are implementation-defined.
+  // FIXME: This might be Itanium ABI specific; we don't yet know what the MS
+  // ABI will do.
+  return true;
 }
 
 unsigned FieldDecl::getFieldIndex() const {
@@ -4222,6 +4381,9 @@ RecordDecl::RecordDecl(Kind DK, TagKind TK, const ASTContext &C,
   setNonTrivialToPrimitiveDefaultInitialize(false);
   setNonTrivialToPrimitiveCopy(false);
   setNonTrivialToPrimitiveDestroy(false);
+  setHasNonTrivialToPrimitiveDefaultInitializeCUnion(false);
+  setHasNonTrivialToPrimitiveDestructCUnion(false);
+  setHasNonTrivialToPrimitiveCopyCUnion(false);
   setParamDestroyedInCallee(false);
   setArgPassingRestrictions(APK_CanPassInRegs);
 }
@@ -4506,7 +4668,7 @@ LabelDecl *LabelDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
 }
 
 void LabelDecl::setMSAsmLabel(StringRef Name) {
-  char *Buffer = new (getASTContext(), 1) char[Name.size() + 1];
+char *Buffer = new (getASTContext(), 1) char[Name.size() + 1];
   memcpy(Buffer, Name.data(), Name.size());
   Buffer[Name.size()] = '\0';
   MSAsmName = Buffer;
@@ -4545,13 +4707,14 @@ FunctionDecl *FunctionDecl::Create(ASTContext &C, DeclContext *DC,
                                    SourceLocation StartLoc,
                                    const DeclarationNameInfo &NameInfo,
                                    QualType T, TypeSourceInfo *TInfo,
-                                   StorageClass SC,
-                                   bool isInlineSpecified,
+                                   StorageClass SC, bool isInlineSpecified,
                                    bool hasWrittenPrototype,
-                                   bool isConstexprSpecified) {
+                                   ConstexprSpecKind ConstexprKind,
+                                   Expr *TrailingRequiresClause) {
   FunctionDecl *New =
       new (C, DC) FunctionDecl(Function, C, DC, StartLoc, NameInfo, T, TInfo,
-                               SC, isInlineSpecified, isConstexprSpecified);
+                               SC, isInlineSpecified, ConstexprKind,
+                               TrailingRequiresClause);
   New->setHasWrittenPrototype(hasWrittenPrototype);
   return New;
 }
@@ -4559,7 +4722,7 @@ FunctionDecl *FunctionDecl::Create(ASTContext &C, DeclContext *DC,
 FunctionDecl *FunctionDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   return new (C, ID) FunctionDecl(Function, C, nullptr, SourceLocation(),
                                   DeclarationNameInfo(), QualType(), nullptr,
-                                  SC_None, false, false);
+                                  SC_None, false, CSK_unspecified, nullptr);
 }
 
 BlockDecl *BlockDecl::Create(ASTContext &C, DeclContext *DC, SourceLocation L) {

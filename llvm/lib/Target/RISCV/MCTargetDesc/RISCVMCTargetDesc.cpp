@@ -16,7 +16,9 @@
 #include "RISCVMCAsmInfo.h"
 #include "RISCVTargetStreamer.h"
 #include "TargetInfo/RISCVTargetInfo.h"
+#include "Utils/RISCVBaseInfo.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
@@ -49,10 +51,11 @@ static MCRegisterInfo *createRISCVMCRegisterInfo(const Triple &TT) {
 }
 
 static MCAsmInfo *createRISCVMCAsmInfo(const MCRegisterInfo &MRI,
-                                       const Triple &TT) {
+                                       const Triple &TT,
+                                       const MCTargetOptions &Options) {
   MCAsmInfo *MAI = new RISCVMCAsmInfo(TT);
 
-  unsigned SP = MRI.getDwarfRegNum(RISCV::X2, true);
+  Register SP = MRI.getDwarfRegNum(RISCV::X2, true);
   MCCFIInstruction Inst = MCCFIInstruction::createDefCfa(nullptr, SP, 0);
   MAI->addInitialFrameState(Inst);
 
@@ -83,6 +86,23 @@ createRISCVObjectTargetStreamer(MCStreamer &S, const MCSubtargetInfo &STI) {
   return nullptr;
 }
 
+static MCStreamer *
+createRISCVMCStreamer(const Triple &TT, MCContext &Context,
+                      std::unique_ptr<MCAsmBackend> &&MAB,
+                      std::unique_ptr<MCObjectWriter> &&OW,
+                      std::unique_ptr<MCCodeEmitter> &&Emitter,
+                      bool RelaxAll) {
+  if (!TT.isOSBinFormatELF())
+    return nullptr;
+
+  RISCVELFStreamer *S =
+      new RISCVELFStreamer(Context, std::move(MAB), std::move(OW),
+                           std::move(Emitter), TT.isArch64Bit());
+  if (RelaxAll)
+    S->getAssembler().setRelaxAll(true);
+  return S;
+}
+
 static MCTargetStreamer *createRISCVAsmTargetStreamer(MCStreamer &S,
                                                       formatted_raw_ostream &OS,
                                                       const MCAsmBackend &MAB,
@@ -91,7 +111,7 @@ static MCTargetStreamer *createRISCVAsmTargetStreamer(MCStreamer &S,
   return new RISCVTargetAsmStreamer(S, OS);
 }
 
-extern "C" void LLVMInitializeRISCVTargetMC() {
+extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVTargetMC() {
   for (Target *T : {&getTheRISCV32Target(), &getTheRISCV64Target()}) {
     TargetRegistry::RegisterMCAsmInfo(*T, createRISCVMCAsmInfo);
     TargetRegistry::RegisterMCInstrInfo(*T, createRISCVMCInstrInfo);
@@ -100,6 +120,7 @@ extern "C" void LLVMInitializeRISCVTargetMC() {
     TargetRegistry::RegisterMCCodeEmitter(*T, createRISCVMCCodeEmitter);
     TargetRegistry::RegisterMCInstPrinter(*T, createRISCVMCInstPrinter);
     TargetRegistry::RegisterMCSubtargetInfo(*T, createRISCVMCSubtargetInfo);
+    TargetRegistry::RegisterELFStreamer(*T, createRISCVMCStreamer);
     TargetRegistry::RegisterObjectTargetStreamer(
         *T, createRISCVObjectTargetStreamer);
 

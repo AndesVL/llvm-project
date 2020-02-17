@@ -47,6 +47,7 @@
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/Casting.h"
@@ -183,7 +184,7 @@ static ModRefInfo GetLocation(const Instruction *Inst, MemoryLocation &Loc,
 MemDepResult MemoryDependenceResults::getCallDependencyFrom(
     CallBase *Call, bool isReadOnlyCall, BasicBlock::iterator ScanIt,
     BasicBlock *BB) {
-  unsigned Limit = BlockScanLimit;
+  unsigned Limit = getDefaultBlockScanLimit();
 
   // Walk backwards through the block, looking for dependencies.
   while (ScanIt != BB->begin()) {
@@ -237,83 +238,6 @@ MemDepResult MemoryDependenceResults::getCallDependencyFrom(
   return MemDepResult::getNonFuncLocal();
 }
 
-unsigned MemoryDependenceResults::getLoadLoadClobberFullWidthSize(
-    const Value *MemLocBase, int64_t MemLocOffs, unsigned MemLocSize,
-    const LoadInst *LI) {
-  // We can only extend simple integer loads.
-  if (!isa<IntegerType>(LI->getType()) || !LI->isSimple())
-    return 0;
-
-  // Load widening is hostile to ThreadSanitizer: it may cause false positives
-  // or make the reports more cryptic (access sizes are wrong).
-  if (LI->getParent()->getParent()->hasFnAttribute(Attribute::SanitizeThread))
-    return 0;
-
-  const DataLayout &DL = LI->getModule()->getDataLayout();
-
-  // Get the base of this load.
-  int64_t LIOffs = 0;
-  const Value *LIBase =
-      GetPointerBaseWithConstantOffset(LI->getPointerOperand(), LIOffs, DL);
-
-  // If the two pointers are not based on the same pointer, we can't tell that
-  // they are related.
-  if (LIBase != MemLocBase)
-    return 0;
-
-  // Okay, the two values are based on the same pointer, but returned as
-  // no-alias.  This happens when we have things like two byte loads at "P+1"
-  // and "P+3".  Check to see if increasing the size of the "LI" load up to its
-  // alignment (or the largest native integer type) will allow us to load all
-  // the bits required by MemLoc.
-
-  // If MemLoc is before LI, then no widening of LI will help us out.
-  if (MemLocOffs < LIOffs)
-    return 0;
-
-  // Get the alignment of the load in bytes.  We assume that it is safe to load
-  // any legal integer up to this size without a problem.  For example, if we're
-  // looking at an i8 load on x86-32 that is known 1024 byte aligned, we can
-  // widen it up to an i32 load.  If it is known 2-byte aligned, we can widen it
-  // to i16.
-  unsigned LoadAlign = LI->getAlignment();
-
-  int64_t MemLocEnd = MemLocOffs + MemLocSize;
-
-  // If no amount of rounding up will let MemLoc fit into LI, then bail out.
-  if (LIOffs + LoadAlign < MemLocEnd)
-    return 0;
-
-  // This is the size of the load to try.  Start with the next larger power of
-  // two.
-  unsigned NewLoadByteSize = LI->getType()->getPrimitiveSizeInBits() / 8U;
-  NewLoadByteSize = NextPowerOf2(NewLoadByteSize);
-
-  while (true) {
-    // If this load size is bigger than our known alignment or would not fit
-    // into a native integer register, then we fail.
-    if (NewLoadByteSize > LoadAlign ||
-        !DL.fitsInLegalInteger(NewLoadByteSize * 8))
-      return 0;
-
-    if (LIOffs + NewLoadByteSize > MemLocEnd &&
-        (LI->getParent()->getParent()->hasFnAttribute(
-             Attribute::SanitizeAddress) ||
-         LI->getParent()->getParent()->hasFnAttribute(
-             Attribute::SanitizeHWAddress)))
-      // We will be reading past the location accessed by the original program.
-      // While this is safe in a regular build, Address Safety analysis tools
-      // may start reporting false warnings. So, don't do widening.
-      return 0;
-
-    // If a load of this width would include all of MemLoc, then we succeed.
-    if (LIOffs + NewLoadByteSize >= MemLocEnd)
-      return NewLoadByteSize;
-
-    NewLoadByteSize <<= 1;
-  }
-}
-
 static bool isVolatile(Instruction *Inst) {
   if (auto *LI = dyn_cast<LoadInst>(Inst))
     return LI->isVolatile();
@@ -356,7 +280,7 @@ MemDepResult
 MemoryDependenceResults::getInvariantGroupPointerDependency(LoadInst *LI,
                                                             BasicBlock *BB) {
 
-  if (!LI->getMetadata(LLVMContext::MD_invariant_group))
+  if (!LI->hasMetadata(LLVMContext::MD_invariant_group))
     return MemDepResult::getUnknown();
 
   // Take the ptr operand after all casts and geps 0. This way we can search
@@ -417,7 +341,7 @@ MemoryDependenceResults::getInvariantGroupPointerDependency(LoadInst *LI,
       // same pointer operand) we can assume that value pointed by pointer
       // operand didn't change.
       if ((isa<LoadInst>(U) || isa<StoreInst>(U)) &&
-          U->getMetadata(LLVMContext::MD_invariant_group) != nullptr)
+          U->hasMetadata(LLVMContext::MD_invariant_group))
         ClosestDependency = GetClosestDependency(ClosestDependency, U);
     }
   }
@@ -443,7 +367,7 @@ MemDepResult MemoryDependenceResults::getSimplePointerDependencyFrom(
     OrderedBasicBlock *OBB) {
   bool isInvariantLoad = false;
 
-  unsigned DefaultLimit = BlockScanLimit;
+  unsigned DefaultLimit = getDefaultBlockScanLimit();
   if (!Limit)
     Limit = &DefaultLimit;
 
@@ -481,7 +405,7 @@ MemDepResult MemoryDependenceResults::getSimplePointerDependencyFrom(
   // Arguably, this logic should be pushed inside AliasAnalysis itself.
   if (isLoad && QueryInst) {
     LoadInst *LI = dyn_cast<LoadInst>(QueryInst);
-    if (LI && LI->getMetadata(LLVMContext::MD_invariant_load) != nullptr)
+    if (LI && LI->hasMetadata(LLVMContext::MD_invariant_load))
       isInvariantLoad = true;
   }
 
@@ -1493,7 +1417,7 @@ void MemoryDependenceResults::RemoveCachedNonLocalPointerDependencies(
     if (auto *I = dyn_cast<Instruction>(P.getPointer())) {
       auto toRemoveIt = ReverseNonLocalDefsCache.find(I);
       if (toRemoveIt != ReverseNonLocalDefsCache.end()) {
-        for (const auto &entry : toRemoveIt->second)
+        for (const auto *entry : toRemoveIt->second)
           NonLocalDefsCache.erase(entry);
         ReverseNonLocalDefsCache.erase(toRemoveIt);
       }
@@ -1746,6 +1670,9 @@ void MemoryDependenceResults::verifyRemoved(Instruction *D) const {
 
 AnalysisKey MemoryDependenceAnalysis::Key;
 
+MemoryDependenceAnalysis::MemoryDependenceAnalysis()
+    : DefaultBlockScanLimit(BlockScanLimit) {}
+
 MemoryDependenceResults
 MemoryDependenceAnalysis::run(Function &F, FunctionAnalysisManager &AM) {
   auto &AA = AM.getResult<AAManager>(F);
@@ -1753,7 +1680,7 @@ MemoryDependenceAnalysis::run(Function &F, FunctionAnalysisManager &AM) {
   auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &PV = AM.getResult<PhiValuesAnalysis>(F);
-  return MemoryDependenceResults(AA, AC, TLI, DT, PV);
+  return MemoryDependenceResults(AA, AC, TLI, DT, PV, DefaultBlockScanLimit);
 }
 
 char MemoryDependenceWrapperPass::ID = 0;
@@ -1807,15 +1734,15 @@ bool MemoryDependenceResults::invalidate(Function &F, const PreservedAnalyses &P
 }
 
 unsigned MemoryDependenceResults::getDefaultBlockScanLimit() const {
-  return BlockScanLimit;
+  return DefaultBlockScanLimit;
 }
 
 bool MemoryDependenceWrapperPass::runOnFunction(Function &F) {
   auto &AA = getAnalysis<AAResultsWrapperPass>().getAAResults();
   auto &AC = getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
-  auto &TLI = getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+  auto &TLI = getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(F);
   auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   auto &PV = getAnalysis<PhiValuesWrapperPass>().getResult();
-  MemDep.emplace(AA, AC, TLI, DT, PV);
+  MemDep.emplace(AA, AC, TLI, DT, PV, BlockScanLimit);
   return false;
 }

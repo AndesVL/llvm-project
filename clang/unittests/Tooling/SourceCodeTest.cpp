@@ -6,16 +6,35 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Tooling/Transformer/SourceCode.h"
 #include "TestVisitor.h"
 #include "clang/Basic/Diagnostic.h"
-#include "clang/Tooling/Refactoring/SourceCode.h"
+#include "llvm/Testing/Support/Annotations.h"
+#include "llvm/Testing/Support/Error.h"
+#include "llvm/Testing/Support/SupportHelpers.h"
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 using namespace clang;
 
-using tooling::getText;
+using llvm::Failed;
+using llvm::Succeeded;
+using llvm::ValueIs;
 using tooling::getExtendedText;
+using tooling::getRangeForEdit;
+using tooling::getText;
+using tooling::validateEditRange;
 
 namespace {
+
+struct IntLitVisitor : TestVisitor<IntLitVisitor> {
+  bool VisitIntegerLiteral(IntegerLiteral *Expr) {
+    OnIntLit(Expr, Context);
+    return true;
+  }
+
+  std::function<void(IntegerLiteral *, ASTContext *Context)> OnIntLit;
+};
 
 struct CallsVisitor : TestVisitor<CallsVisitor> {
   bool VisitCallExpr(CallExpr *Expr) {
@@ -25,6 +44,19 @@ struct CallsVisitor : TestVisitor<CallsVisitor> {
 
   std::function<void(CallExpr *, ASTContext *Context)> OnCall;
 };
+
+// Equality matcher for `clang::CharSourceRange`, which lacks `operator==`.
+MATCHER_P(EqualsRange, R, "") {
+  return arg.isTokenRange() == R.isTokenRange() &&
+         arg.getBegin() == R.getBegin() && arg.getEnd() == R.getEnd();
+}
+
+static ::testing::Matcher<CharSourceRange> AsRange(const SourceManager &SM,
+                                                   llvm::Annotations::Range R) {
+  return EqualsRange(CharSourceRange::getCharRange(
+      SM.getLocForStartOfFile(SM.getMainFileID()).getLocWithOffset(R.Begin),
+      SM.getLocForStartOfFile(SM.getMainFileID()).getLocWithOffset(R.End)));
+}
 
 TEST(SourceCodeTest, getText) {
   CallsVisitor Visitor;
@@ -94,4 +126,194 @@ TEST(SourceCodeTest, getExtendedText) {
   Visitor.runOver("int foo() { return foo() + 3; }");
 }
 
+TEST(SourceCodeTest, EditRangeWithMacroExpansionsShouldSucceed) {
+  // The call expression, whose range we are extracting, includes two macro
+  // expansions.
+  llvm::Annotations Code(R"cpp(
+#define M(a) a * 13
+int foo(int x, int y);
+int a = $r[[foo(M(1), M(2))]];
+)cpp");
+
+  CallsVisitor Visitor;
+
+  Visitor.OnCall = [&Code](CallExpr *CE, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(CE->getSourceRange());
+    EXPECT_THAT(getRangeForEdit(Range, *Context),
+                ValueIs(AsRange(Context->getSourceManager(), Code.range("r"))));
+  };
+  Visitor.runOver(Code.code());
+}
+
+TEST(SourceCodeTest, EditWholeMacroExpansionShouldSucceed) {
+  llvm::Annotations Code(R"cpp(
+#define FOO 10
+int a = $r[[FOO]];
+)cpp");
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [&Code](IntegerLiteral *Expr, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(Expr->getSourceRange());
+    EXPECT_THAT(getRangeForEdit(Range, *Context),
+                ValueIs(AsRange(Context->getSourceManager(), Code.range("r"))));
+  };
+  Visitor.runOver(Code.code());
+}
+
+TEST(SourceCodeTest, EditPartialMacroExpansionShouldFail) {
+  std::string Code = R"cpp(
+#define BAR 10+
+int c = BAR 3.0;
+)cpp";
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [](IntegerLiteral *Expr, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(Expr->getSourceRange());
+    EXPECT_FALSE(getRangeForEdit(Range, *Context).hasValue());
+  };
+  Visitor.runOver(Code);
+}
+
+TEST(SourceCodeTest, EditWholeMacroArgShouldSucceed) {
+  llvm::Annotations Code(R"cpp(
+#define FOO(a) a + 7.0;
+int a = FOO($r[[10]]);
+)cpp");
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [&Code](IntegerLiteral *Expr, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(Expr->getSourceRange());
+    EXPECT_THAT(getRangeForEdit(Range, *Context),
+                ValueIs(AsRange(Context->getSourceManager(), Code.range("r"))));
+  };
+  Visitor.runOver(Code.code());
+}
+
+TEST(SourceCodeTest, EditPartialMacroArgShouldSucceed) {
+  llvm::Annotations Code(R"cpp(
+#define FOO(a) a + 7.0;
+int a = FOO($r[[10]] + 10.0);
+)cpp");
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [&Code](IntegerLiteral *Expr, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(Expr->getSourceRange());
+    EXPECT_THAT(getRangeForEdit(Range, *Context),
+                ValueIs(AsRange(Context->getSourceManager(), Code.range("r"))));
+  };
+  Visitor.runOver(Code.code());
+}
+
+TEST(SourceCodeTest, EditRangeWithMacroExpansionsIsValid) {
+  // The call expression, whose range we are extracting, includes two macro
+  // expansions.
+  llvm::StringRef Code = R"cpp(
+#define M(a) a * 13
+int foo(int x, int y);
+int a = foo(M(1), M(2));
+)cpp";
+
+  CallsVisitor Visitor;
+
+  Visitor.OnCall = [](CallExpr *CE, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(CE->getSourceRange());
+    EXPECT_THAT_ERROR(validateEditRange(Range, Context->getSourceManager()),
+                      Succeeded());
+  };
+  Visitor.runOver(Code);
+}
+
+TEST(SourceCodeTest, SpellingRangeOfMacroArgIsValid) {
+  llvm::StringRef Code = R"cpp(
+#define FOO(a) a + 7.0;
+int a = FOO(10);
+)cpp";
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [](IntegerLiteral *Expr, ASTContext *Context) {
+    SourceLocation ArgLoc =
+        Context->getSourceManager().getSpellingLoc(Expr->getBeginLoc());
+    // The integer literal is a single token.
+    auto ArgRange = CharSourceRange::getTokenRange(ArgLoc);
+    EXPECT_THAT_ERROR(validateEditRange(ArgRange, Context->getSourceManager()),
+                      Succeeded());
+  };
+  Visitor.runOver(Code);
+}
+
+TEST(SourceCodeTest, InvalidEditRangeIsInvalid) {
+  llvm::StringRef Code = "int c = 10;";
+
+  // We use the visitor just to get a valid context.
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [](IntegerLiteral *, ASTContext *Context) {
+    CharSourceRange Invalid;
+    EXPECT_THAT_ERROR(validateEditRange(Invalid, Context->getSourceManager()),
+                      Failed());
+  };
+  Visitor.runOver(Code);
+}
+
+TEST(SourceCodeTest, InvertedEditRangeIsInvalid) {
+  llvm::StringRef Code = R"cpp(
+int foo(int x);
+int a = foo(2);
+)cpp";
+
+  CallsVisitor Visitor;
+  Visitor.OnCall = [](CallExpr *Expr, ASTContext *Context) {
+    auto InvertedRange = CharSourceRange::getTokenRange(
+        SourceRange(Expr->getEndLoc(), Expr->getBeginLoc()));
+    EXPECT_THAT_ERROR(
+        validateEditRange(InvertedRange, Context->getSourceManager()),
+        Failed());
+  };
+  Visitor.runOver(Code);
+}
+
+TEST(SourceCodeTest, MacroArgIsInvalid) {
+  llvm::StringRef Code = R"cpp(
+#define FOO(a) a + 7.0;
+int a = FOO(10);
+)cpp";
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [](IntegerLiteral *Expr, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(Expr->getSourceRange());
+    EXPECT_THAT_ERROR(validateEditRange(Range, Context->getSourceManager()),
+                      Failed());
+  };
+  Visitor.runOver(Code);
+}
+
+TEST(SourceCodeTest, EditWholeMacroExpansionIsInvalid) {
+  llvm::StringRef Code = R"cpp(
+#define FOO 10
+int a = FOO;
+)cpp";
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [](IntegerLiteral *Expr, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(Expr->getSourceRange());
+    EXPECT_THAT_ERROR(validateEditRange(Range, Context->getSourceManager()),
+                      Failed());
+
+  };
+  Visitor.runOver(Code);
+}
+
+TEST(SourceCodeTest, EditPartialMacroExpansionIsInvalid) {
+  llvm::StringRef Code = R"cpp(
+#define BAR 10+
+int c = BAR 3.0;
+)cpp";
+
+  IntLitVisitor Visitor;
+  Visitor.OnIntLit = [](IntegerLiteral *Expr, ASTContext *Context) {
+    auto Range = CharSourceRange::getTokenRange(Expr->getSourceRange());
+    EXPECT_THAT_ERROR(validateEditRange(Range, Context->getSourceManager()),
+                      Failed());
+  };
+  Visitor.runOver(Code);
+}
 } // end anonymous namespace

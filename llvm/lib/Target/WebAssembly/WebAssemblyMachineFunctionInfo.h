@@ -55,6 +55,12 @@ class WebAssemblyFunctionInfo final : public MachineFunctionInfo {
   // A virtual register holding the base pointer for functions that have
   // overaligned values on the user stack.
   unsigned BasePtrVreg = -1U;
+  // A virtual register holding the frame base. This is either FP or SP
+  // after it has been replaced by a vreg
+  unsigned FrameBaseVreg = -1U;
+  // The local holding the frame base. This is either FP or SP
+  // after WebAssemblyExplicitLocals
+  unsigned FrameBaseLocal = -1U;
 
   // Function properties.
   bool CFGStackified = false;
@@ -90,19 +96,36 @@ public:
     assert(BasePtrVreg != -1U && "Base ptr vreg hasn't been set");
     return BasePtrVreg;
   }
+  void setFrameBaseVreg(unsigned Reg) { FrameBaseVreg = Reg; }
+  unsigned getFrameBaseVreg() const {
+    assert(FrameBaseVreg != -1U && "Frame base vreg hasn't been set");
+    return FrameBaseVreg;
+  }
+  // Return true if the frame base physreg has been replaced by a virtual reg.
+  bool isFrameBaseVirtual() const { return FrameBaseVreg != -1U; }
+  void setFrameBaseLocal(unsigned Local) { FrameBaseLocal = Local; }
+  unsigned getFrameBaseLocal() const {
+    assert(FrameBaseLocal != -1U && "Frame base local hasn't been set");
+    return FrameBaseLocal;
+  }
   void setBasePointerVreg(unsigned Reg) { BasePtrVreg = Reg; }
 
   static const unsigned UnusedReg = -1u;
 
   void stackifyVReg(unsigned VReg) {
     assert(MF.getRegInfo().getUniqueVRegDef(VReg));
-    auto I = TargetRegisterInfo::virtReg2Index(VReg);
+    auto I = Register::virtReg2Index(VReg);
     if (I >= VRegStackified.size())
       VRegStackified.resize(I + 1);
     VRegStackified.set(I);
   }
+  void unstackifyVReg(unsigned VReg) {
+    auto I = Register::virtReg2Index(VReg);
+    if (I < VRegStackified.size())
+      VRegStackified.reset(I);
+  }
   bool isVRegStackified(unsigned VReg) const {
-    auto I = TargetRegisterInfo::virtReg2Index(VReg);
+    auto I = Register::virtReg2Index(VReg);
     if (I >= VRegStackified.size())
       return false;
     return VRegStackified.test(I);
@@ -111,12 +134,12 @@ public:
   void initWARegs();
   void setWAReg(unsigned VReg, unsigned WAReg) {
     assert(WAReg != UnusedReg);
-    auto I = TargetRegisterInfo::virtReg2Index(VReg);
+    auto I = Register::virtReg2Index(VReg);
     assert(I < WARegs.size());
     WARegs[I] = WAReg;
   }
   unsigned getWAReg(unsigned VReg) const {
-    auto I = TargetRegisterInfo::virtReg2Index(VReg);
+    auto I = Register::virtReg2Index(VReg);
     assert(I < WARegs.size());
     return WARegs[I];
   }

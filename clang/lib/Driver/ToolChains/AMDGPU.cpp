@@ -12,6 +12,7 @@
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "llvm/Option/ArgList.h"
+#include "llvm/Support/TargetParser.h"
 
 using namespace clang::driver;
 using namespace clang::driver::tools;
@@ -31,7 +32,7 @@ void amdgpu::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back("-shared");
   CmdArgs.push_back("-o");
   CmdArgs.push_back(Output.getFilename());
-  C.addCommand(llvm::make_unique<Command>(JA, *this, Args.MakeArgString(Linker),
+  C.addCommand(std::make_unique<Command>(JA, *this, Args.MakeArgString(Linker),
                                           CmdArgs, Inputs));
 }
 
@@ -40,6 +41,17 @@ void amdgpu::getAMDGPUTargetFeatures(const Driver &D,
                                      std::vector<StringRef> &Features) {
   if (const Arg *dAbi = Args.getLastArg(options::OPT_mamdgpu_debugger_abi))
     D.Diag(diag::err_drv_clang_unsupported) << dAbi->getAsString(Args);
+
+  if (Args.getLastArg(options::OPT_mwavefrontsize64)) {
+    Features.push_back("-wavefrontsize16");
+    Features.push_back("-wavefrontsize32");
+    Features.push_back("+wavefrontsize64");
+  }
+  if (Args.getLastArg(options::OPT_mno_wavefrontsize64)) {
+    Features.push_back("-wavefrontsize16");
+    Features.push_back("+wavefrontsize32");
+    Features.push_back("-wavefrontsize64");
+  }
 
   handleTargetFeaturesGroup(
     Args, Features, options::OPT_m_amdgpu_Features_Group);
@@ -89,6 +101,40 @@ AMDGPUToolChain::TranslateArgs(const DerivedArgList &Args, StringRef BoundArch,
   }
 
   return DAL;
+}
+
+llvm::DenormalMode AMDGPUToolChain::getDefaultDenormalModeForType(
+    const llvm::opt::ArgList &DriverArgs, Action::OffloadKind DeviceOffloadKind,
+    const llvm::fltSemantics *FPType) const {
+  // Denormals should always be enabled for f16 and f64.
+  if (!FPType || FPType != &llvm::APFloat::IEEEsingle())
+    return llvm::DenormalMode::IEEE;
+
+  if (DeviceOffloadKind == Action::OFK_Cuda) {
+    if (FPType && FPType == &llvm::APFloat::IEEEsingle() &&
+        DriverArgs.hasFlag(options::OPT_fcuda_flush_denormals_to_zero,
+                           options::OPT_fno_cuda_flush_denormals_to_zero,
+                           false))
+      return llvm::DenormalMode::PreserveSign;
+  }
+
+  const StringRef GpuArch = DriverArgs.getLastArgValue(options::OPT_mcpu_EQ);
+  auto Kind = llvm::AMDGPU::parseArchAMDGCN(GpuArch);
+
+  // Default to enabling f32 denormals by default on subtargets where fma is
+  // fast with denormals
+
+  const unsigned ArchAttr = llvm::AMDGPU::getArchAttrAMDGCN(Kind);
+  const bool DefaultDenormsAreZeroForTarget =
+    (ArchAttr & llvm::AMDGPU::FEATURE_FAST_FMA_F32) &&
+    (ArchAttr & llvm::AMDGPU::FEATURE_FAST_DENORMAL_F32);
+
+  // TODO: There are way too many flags that change this. Do we need to check
+  // them all?
+  bool DAZ = DriverArgs.hasArg(options::OPT_cl_denorms_are_zero) ||
+             !DefaultDenormsAreZeroForTarget;
+  // Outputs are flushed to zero, preserving sign
+  return DAZ ? llvm::DenormalMode::PreserveSign : llvm::DenormalMode::IEEE;
 }
 
 void AMDGPUToolChain::addClangTargetOptions(

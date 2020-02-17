@@ -10,7 +10,6 @@
 // Now try with a defined errno variable:
 // RUN: %cheri_purecap_cc1 -mllvm -cheri-cap-table-abi=legacy -emit-obj %s -o %t.o -DDEFINED_ERRNO=1
 // RUN: ld.lld -shared -o %t.so %t.o -verbose-cap-relocs
-// RUN: llvm-readelf -r -program-headers %t.so
 // RUN: llvm-readelf -r -program-headers %t.so | FileCheck %s -check-prefix DEFINED-MAPPING
 // RUN: llvm-objdump -s --section=.global_sizes %t.so | FileCheck %s -check-prefix DEFINED-DUMP
 
@@ -37,7 +36,7 @@ int* __error() {
 
 // Check that we filled in zeroes in the .global_sizes sections:
 // DUMP:      Contents of section .global_sizes:
-// DUMP-NEXT: 20000 00000000 00000000                    ........
+// DUMP-NEXT: 20400 00000000 00000000                    ........
 
 // DEFINED-MAPPING-LABEL: Section to Segment mapping:
 // DEFINED-MAPPING-NEXT:  Segment Sections...

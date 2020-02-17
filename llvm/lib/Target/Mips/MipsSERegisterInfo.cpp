@@ -98,7 +98,8 @@ static inline unsigned getLoadStoreOffsetSizeInBits(const unsigned Opcode,
     return 16 + 4 /* scale factor */;
   case Mips::CIncOffsetImm:
     return 11;
-  case Mips::CheriBoundedStackPseudo:
+  case Mips::CheriBoundedStackPseudoImm:
+  case Mips::CheriBoundedStackPseudoReg:
     return 1;  // only 0 is valid, otherwise we need a CIncOffset
   case Mips::LD_B:
   case Mips::ST_B:
@@ -163,8 +164,9 @@ static inline unsigned getLoadStoreOffsetSizeInBits(const unsigned Opcode,
 /// Get the scale factor applied to the immediate in the given load/store.
 static inline unsigned getLoadStoreOffsetAlign(const unsigned Opcode) {
   switch (Opcode) {
-  case Mips::CheriBoundedStackPseudo:
-    return 64; // Ensure that only 0 is valid (since max witdth is 1)
+  case Mips::CheriBoundedStackPseudoImm:
+  case Mips::CheriBoundedStackPseudoReg:
+    return 64; // Ensure that only 0 is valid (since max width is 1)
   case Mips::CAPSTORE16:
   case Mips::CAPLOAD16:
   case Mips::CAPLOAD1632:
@@ -288,7 +290,8 @@ void MipsSERegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
       ImmOpNo = 2;
       RegOpNo = 1;
       break;
-    case Mips::CheriBoundedStackPseudo:
+    case Mips::CheriBoundedStackPseudoImm:
+    case Mips::CheriBoundedStackPseudoReg:
       ImmOpNo = 2;
       RegOpNo = 1;
       break;
@@ -297,6 +300,9 @@ void MipsSERegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
     case Mips::INLINEASM:
       break;
     default:
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+      MI.dump();
+#endif
       llvm_unreachable("Unsupported instruction in eliminateFI!");
     }
   }
@@ -321,8 +327,7 @@ void MipsSERegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
     // element size), otherwise it is a 16-bit signed immediate.
     unsigned OffsetBitSize =
         getLoadStoreOffsetSizeInBits(MI.getOpcode(), MI.getOperand(OpNo - 1));
-    unsigned OffsetAlign = getLoadStoreOffsetAlign(MI.getOpcode());
-
+    const Align OffsetAlign(getLoadStoreOffsetAlign(MI.getOpcode()));
     auto *STI = TM.getSubtargetImpl(MF.getFunction());
     const MipsSEInstrInfo &TII = *static_cast<const MipsSEInstrInfo *>(
           STI->getInstrInfo());
@@ -348,7 +353,7 @@ void MipsSERegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
     }
 
     if (ABI.IsCheriPureCap()) {
-      if (!isIntN(OffsetBitSize, Offset) || OffsetToAlignment(Offset, OffsetAlign) != 0) {
+      if (!isIntN(OffsetBitSize, Offset) || !isAligned(OffsetAlign, Offset)) {
         MachineBasicBlock &MBB = *MI.getParent();
         // If we have an offset that needs to fit into a signed n-bit immediate
         // (where n < 16) and doesn't, but does fit into 16-bits then use an ADDiu
@@ -378,7 +383,9 @@ void MipsSERegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
           }
 #endif
         unsigned TmpCap = -1;
-        if (isFrameRegLoad || MI.getOpcode() == Mips::CheriBoundedStackPseudo) {
+        if (isFrameRegLoad ||
+            MI.getOpcode() == Mips::CheriBoundedStackPseudoReg ||
+            MI.getOpcode() == Mips::CheriBoundedStackPseudoImm) {
           assert(MI.getOpcode() == Mips::LOADCAP || MI.isPseudo());
           TmpCap = MI.getOperand(0).getReg();
         } else {
@@ -405,15 +412,14 @@ void MipsSERegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
         Offset = 0;
       }
     } else if (OffsetBitSize < 16 && isInt<16>(Offset) &&
-        (!isIntN(OffsetBitSize, Offset) ||
-         OffsetToAlignment(Offset, OffsetAlign) != 0)) {
+        (!isIntN(OffsetBitSize, Offset) || !isAligned(OffsetAlign, Offset))) {
       // If we have an offset that needs to fit into a signed n-bit immediate
       // (where n < 16) and doesn't, but does fit into 16-bits then use an ADDiu
       MachineBasicBlock &MBB = *MI.getParent();
       const TargetRegisterClass *PtrRC =
           ABI.ArePtrs64bit() ? &Mips::GPR64RegClass : &Mips::GPR32RegClass;
       MachineRegisterInfo &RegInfo = MBB.getParent()->getRegInfo();
-      unsigned Reg = RegInfo.createVirtualRegister(PtrRC);
+      Register Reg = RegInfo.createVirtualRegister(PtrRC);
       BuildMI(MBB, II, DL, TII.get(ABI.GetPtrAddiuOp()), Reg)
           .addReg(FrameReg)
           .addImm(Offset);

@@ -33,14 +33,14 @@
   ; Function Attrs: nounwind
   declare void @llvm.stackprotector(i8*, i8**) addrspace(200) #2
 
-  attributes #0 = { "target-cpu"="cheri128" "target-features"="+cheri128" }
+  attributes #0 ={ nounwind }
   attributes #1 = { nounwind readnone }
   attributes #2 = { nounwind }
 
 ...
 ---
 name:            b
-alignment:       3
+alignment:       8
 exposesReturnsTwice: false
 legalized:       false
 regBankSelected: false
@@ -85,7 +85,7 @@ frameInfo:
 fixedStack:
 stack:
   - { id: 0, name: a.addr, type: default, offset: 0, size: 1, alignment: 4,
-      stack-id: 0, callee-saved-register: '', callee-saved-restored: true,
+      stack-id: default, callee-saved-register: '', callee-saved-restored: true,
       debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
 constants:
 body:             |

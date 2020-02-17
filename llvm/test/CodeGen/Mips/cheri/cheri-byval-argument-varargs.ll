@@ -15,12 +15,12 @@ define i32 @fn1() local_unnamed_addr #0 {
 ; CHECK:       # %bb.0: # %entry
 ; CHECK-NEXT:    daddiu $1, $zero, -[[#STACKFRAME_SIZE:]]
 ; CHECK-NEXT:    cincoffset $c11, $c11, $1
-; CHECK-NEXT:    csc $c19, $zero, [[#STACKFRAME_SIZE - #CAP_SIZE]]($c11)
-; CHECK-NEXT:    csc $c18, $zero, [[#STACKFRAME_SIZE - (#CAP_SIZE * 2)]]($c11)
-; CHECK-NEXT:    csc $c17, $zero, [[#STACKFRAME_SIZE - (#CAP_SIZE * 3)]]($c11)
-; CHECK-NEXT:    lui $1, %hi(%neg(%captab_rel(fn1)))
-; CHECK-NEXT:    daddiu $1, $1, %lo(%neg(%captab_rel(fn1)))
-; CHECK-NEXT:    cincoffset $c19, $c12, $1
+; CHECK-NEXT:    csc $c19, $zero, [[#STACKFRAME_SIZE - CAP_SIZE]]($c11)
+; CHECK-NEXT:    csc $c18, $zero, [[#STACKFRAME_SIZE - (CAP_SIZE * 2)]]($c11)
+; CHECK-NEXT:    csc $c17, $zero, [[#STACKFRAME_SIZE - (CAP_SIZE * 3)]]($c11)
+; CHECK-NEXT:    lui $1, %pcrel_hi(_CHERI_CAPABILITY_TABLE_-8)
+; CHECK-NEXT:    daddiu $1, $1, %pcrel_lo(_CHERI_CAPABILITY_TABLE_-4)
+; CHECK-NEXT:    cgetpccincoffset $c19, $1
 ; CHECK-NEXT:    daddiu $1, $zero, 4096
 ; CHECK-NEXT:    cincoffset $c18, $c11, [[#CAP_SIZE * 2]]
 ; CHECK-NEXT:    csetbounds $c18, $c18, $1
@@ -35,9 +35,9 @@ define i32 @fn1() local_unnamed_addr #0 {
 ; CHECK-NEXT:    ori $1, $zero, 65495
 ; CHECK-NEXT:    cjalr $c12, $c17
 ; CHECK-NEXT:    candperm $c13, $c1, $1
-; CHECK-NEXT:    clc $c17, $zero, [[#STACKFRAME_SIZE - (#CAP_SIZE * 3)]]($c11)
-; CHECK-NEXT:    clc $c18, $zero, [[#STACKFRAME_SIZE - (#CAP_SIZE * 2)]]($c11)
-; CHECK-NEXT:    clc $c19, $zero, [[#STACKFRAME_SIZE - #CAP_SIZE]]($c11)
+; CHECK-NEXT:    clc $c17, $zero, [[#STACKFRAME_SIZE - (CAP_SIZE * 3)]]($c11)
+; CHECK-NEXT:    clc $c18, $zero, [[#STACKFRAME_SIZE - (CAP_SIZE * 2)]]($c11)
+; CHECK-NEXT:    clc $c19, $zero, [[#STACKFRAME_SIZE - CAP_SIZE]]($c11)
 ; CHECK-NEXT:    daddiu $1, $zero, [[#STACKFRAME_SIZE]]
 ; CHECK-NEXT:    cjr $c17
 ; CHECK-NEXT:    cincoffset $c11, $c11, $1
@@ -54,8 +54,8 @@ declare i32 @fn2(...) #1
 ; Function Attrs: argmemonly nounwind
 declare void @llvm.memcpy.p200i8.p200i8.i64(i8 addrspace(200)* nocapture writeonly, i8 addrspace(200)* nocapture readonly, i64, i32, i1) #2
 
-attributes #0 = { nounwind "correctly-rounded-divide-sqrt-fp-math"="false" "disable-tail-calls"="false" "less-precise-fpmad"="false" "no-frame-pointer-elim"="false" "no-infs-fp-math"="false" "no-jump-tables"="false" "no-nans-fp-math"="false" "no-signed-zeros-fp-math"="false" "no-trapping-math"="false" "stack-protector-buffer-size"="8" "target-cpu"="cheri128" "target-features"="+cheri128,+soft-float" "unsafe-fp-math"="false" "use-soft-float"="false" }
-attributes #1 = { "correctly-rounded-divide-sqrt-fp-math"="false" "disable-tail-calls"="false" "less-precise-fpmad"="false" "no-frame-pointer-elim"="false" "no-infs-fp-math"="false" "no-nans-fp-math"="false" "no-signed-zeros-fp-math"="false" "no-trapping-math"="false" "stack-protector-buffer-size"="8" "target-cpu"="cheri128" "target-features"="+cheri128,+soft-float" "unsafe-fp-math"="false" "use-soft-float"="false" }
+attributes #0 = { nounwind }
+attributes #1 = { nounwind }
 attributes #2 = { argmemonly nounwind }
 attributes #3 = { nounwind }
 

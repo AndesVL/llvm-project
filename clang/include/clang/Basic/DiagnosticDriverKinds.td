@@ -143,8 +143,8 @@ def err_drv_missing_arg_mtp : Error<
   "missing argument to '%0'">;
 def err_drv_invalid_libcxx_deployment : Error<
   "invalid deployment target for -stdlib=libc++ (requires %0 or later)">;
-def err_drv_invalid_argument_to_fdebug_prefix_map : Error<
-  "invalid argument '%0' to -fdebug-prefix-map">;
+def err_drv_invalid_argument_to_option : Error<
+  "invalid argument '%0' to -%1">;
 def err_drv_malformed_sanitizer_blacklist : Error<
   "malformed sanitizer blacklist: '%0'">;
 def err_drv_duplicate_config : Error<
@@ -159,6 +159,8 @@ def err_drv_cannot_read_config_file : Error<
   "cannot read configuration file '%0'">;
 def err_drv_nested_config_file: Error<
   "option '--config' is not allowed inside configuration file">;
+def err_drv_arg_requires_bitcode_input: Error<
+  "option '%0' requires input to be LLVM bitcode">;
 
 def err_target_unsupported_arch
   : Error<"the target architecture '%0' is not supported by the target '%1'">;
@@ -181,9 +183,6 @@ def warn_drv_unknown_argument_clang_cl_with_suggestion : Warning<
 
 def warn_drv_ycyu_different_arg_clang_cl : Warning<
   "support for '/Yc' and '/Yu' with different filenames not implemented yet; flags ignored">,
-  InGroup<ClangClPch>;
-def warn_drv_ycyu_no_fi_arg_clang_cl : Warning<
-  "support for '%0' without a corresponding /FI flag not implemented yet; flag ignored">,
   InGroup<ClangClPch>;
 def warn_drv_yc_multiple_inputs_clang_cl : Warning<
   "support for '/Yc' with more than one source file not implemented yet; flag ignored">,
@@ -229,7 +228,9 @@ def err_drv_gnustep_objc_runtime_incompatible_binary : Error<
 def err_drv_emit_llvm_link : Error<
    "-emit-llvm cannot be used when linking">;
 def err_drv_optimization_remark_pattern : Error<
-  "%0 in '%1'">;
+  "in pattern '%1': %0">;
+def err_drv_optimization_remark_format : Error<
+  "unknown remark serializer format: '%0'">;
 def err_drv_no_neon_modifier : Error<"[no]neon is not accepted as modifier, please use [no]simd instead">;
 def err_drv_invalid_omp_target : Error<"OpenMP target is invalid: '%0'">;
 def err_drv_omp_host_ir_file_not_found : Error<
@@ -248,6 +249,9 @@ def err_drv_unsupported_embed_bitcode
     : Error<"%0 is not supported with -fembed-bitcode">;
 def err_drv_bitcode_unsupported_on_toolchain : Error<
   "-fembed-bitcode is not supported on versions of iOS prior to 6.0">;
+
+def err_drv_invalid_malign_branch_EQ : Error<
+  "invalid argument '%0' to -malign-branch=; each element must be one of: %1">;
 
 def warn_O4_is_O3 : Warning<"-O4 is equivalent to -O3">, InGroup<Deprecated>;
 def warn_drv_optimization_value : Warning<"optimization level '%0' is not supported; using '%1%2' instead">,
@@ -364,6 +368,9 @@ def err_drv_ropi_rwpi_incompatible_with_pic : Error<
 def err_drv_ropi_incompatible_with_cxx : Error<
   "ROPI is not compatible with c++">;
 
+def err_stack_tagging_requires_hardware_feature : Error<
+  "'-fsanitize=memtag' requires hardware support (+memtag)">;
+
 def warn_target_unsupported_nan2008 : Warning<
   "ignoring '-mnan=2008' option because the '%0' architecture does not support it">,
   InGroup<UnsupportedNan>;
@@ -379,6 +386,9 @@ def warn_target_unsupported_abs2008 : Warning<
 def warn_target_unsupported_compact_branches : Warning<
   "ignoring '-mcompact-branches=' option because the '%0' architecture does not"
   " support it">, InGroup<UnsupportedCB>;
+def warn_target_unsupported_extension : Warning<
+  "ignoring extension '%0' because the '%1' architecture does not support it">,
+   InGroup<InvalidCommandLineArgument>;
 def warn_drv_unsupported_gpopt : Warning<
   "ignoring '-mgpopt' option as it cannot be used with %select{|the implicit"
   " usage of }0-mabicalls">,
@@ -397,6 +407,13 @@ def err_drv_unsupported_indirect_jump_opt : Error<
   "'-mindirect-jump=%0' is unsupported with the '%1' architecture">;
 def err_drv_unknown_indirect_jump_opt : Error<
   "unknown '-mindirect-jump=' option '%0'">;
+def err_drv_unsupported_fpatchable_function_entry_argument : Error<
+  "the second argument of '-fpatchable-function-entry' must be 0 or omitted">;
+
+def warn_drv_ignored_ssp_purecap : Warning<
+  "ignoring '%0' option since stack protector is unnecessary when using "
+  "pure-capability CHERI compilation">,
+  InGroup<OptionIgnored>;
 
 def warn_drv_unable_to_find_directory_expected : Warning<
   "unable to find %0 directory, expected to be in '%1'">,

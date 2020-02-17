@@ -70,9 +70,31 @@ const DWARFDataExtractor &DWARFContext::getOrLoadLineStrData() {
                           m_data_debug_line_str);
 }
 
+const DWARFDataExtractor &DWARFContext::getOrLoadLocData() {
+  return LoadOrGetSection(eSectionTypeDWARFDebugLoc,
+                          eSectionTypeDWARFDebugLocDwo, m_data_debug_loc);
+}
+
+const DWARFDataExtractor &DWARFContext::getOrLoadLocListsData() {
+  return LoadOrGetSection(eSectionTypeDWARFDebugLocLists,
+                          eSectionTypeDWARFDebugLocListsDwo,
+                          m_data_debug_loclists);
+}
+
 const DWARFDataExtractor &DWARFContext::getOrLoadMacroData() {
   return LoadOrGetSection(eSectionTypeDWARFDebugMacro, llvm::None,
                           m_data_debug_macro);
+}
+
+const DWARFDataExtractor &DWARFContext::getOrLoadRangesData() {
+  return LoadOrGetSection(eSectionTypeDWARFDebugRanges, llvm::None,
+                          m_data_debug_ranges);
+}
+
+const DWARFDataExtractor &DWARFContext::getOrLoadRngListsData() {
+  return LoadOrGetSection(eSectionTypeDWARFDebugRngLists,
+                          eSectionTypeDWARFDebugRngListsDwo,
+                          m_data_debug_rnglists);
 }
 
 const DWARFDataExtractor &DWARFContext::getOrLoadStrData() {
@@ -87,6 +109,27 @@ const DWARFDataExtractor &DWARFContext::getOrLoadStrOffsetsData() {
 }
 
 const DWARFDataExtractor &DWARFContext::getOrLoadDebugTypesData() {
-  return LoadOrGetSection(eSectionTypeDWARFDebugTypes, llvm::None,
-                          m_data_debug_types);
+  return LoadOrGetSection(eSectionTypeDWARFDebugTypes,
+                          eSectionTypeDWARFDebugTypesDwo, m_data_debug_types);
+}
+
+llvm::DWARFContext &DWARFContext::GetAsLLVM() {
+  if (!m_llvm_context) {
+    llvm::StringMap<std::unique_ptr<llvm::MemoryBuffer>> section_map;
+    uint8_t addr_size = 0;
+    auto AddSection = [&](llvm::StringRef name, DWARFDataExtractor data) {
+      // Set the address size the first time we see it.
+      if (addr_size == 0)
+        addr_size = data.GetAddressByteSize();
+
+      section_map.try_emplace(
+          name, llvm::MemoryBuffer::getMemBuffer(toStringRef(data.GetData()),
+                                                 name, false));
+    };
+
+    AddSection("debug_line_str", getOrLoadLineStrData());
+
+    m_llvm_context = llvm::DWARFContext::create(section_map, addr_size);
+  }
+  return *m_llvm_context;
 }

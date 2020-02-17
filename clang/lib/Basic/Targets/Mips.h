@@ -110,7 +110,13 @@ public:
         UseIndirectJumpHazard(false), FPMode(FPXX) {
     TheCXXABI.set(TargetCXXABI::GenericMIPS);
 
-    if (Triple.isMIPS32())
+    if (Opts.ABI == "purecap") {
+      assert(Triple.getEnvironment() == llvm::Triple::CheriPurecap);
+    }
+
+    if (Triple.getEnvironment() == llvm::Triple::CheriPurecap)
+      setABI("purecap");
+    else if (Triple.isMIPS32())
       setABI("o32");
     else if (Triple.getEnvironment() == llvm::Triple::GNUABIN32)
       setABI("n32");
@@ -284,6 +290,8 @@ public:
     // a raw cheri here.
     if (CPU == "octeon")
       Features["mips64r2"] = Features["cnmips"] = true;
+    else if (CPU == "octeon+")
+      Features["mips64r2"] = Features["cnmips"] = Features["cnmipsp"] = true;
     else
       Features[CPU] = true;
 

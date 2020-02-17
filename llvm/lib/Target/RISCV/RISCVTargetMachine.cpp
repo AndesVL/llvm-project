@@ -10,34 +10,62 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "RISCV.h"
 #include "RISCVTargetMachine.h"
+#include "RISCV.h"
 #include "RISCVTargetObjectFile.h"
+#include "RISCVTargetTransformInfo.h"
 #include "TargetInfo/RISCVTargetInfo.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/CodeGen/GlobalISel/IRTranslator.h"
+#include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
+#include "llvm/CodeGen/GlobalISel/Legalizer.h"
+#include "llvm/CodeGen/GlobalISel/RegBankSelect.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Target/TargetOptions.h"
 using namespace llvm;
 
-extern "C" void LLVMInitializeRISCVTarget() {
+extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVTarget() {
   RegisterTargetMachine<RISCVTargetMachine> X(getTheRISCV32Target());
   RegisterTargetMachine<RISCVTargetMachine> Y(getTheRISCV64Target());
   auto PR = PassRegistry::getPassRegistry();
+  initializeGlobalISel(*PR);
   initializeRISCVExpandPseudoPass(*PR);
 }
 
-static StringRef computeDataLayout(const Triple &TT) {
-  if (TT.isArch64Bit()) {
-    return "e-m:e-p:64:64-i64:64-i128:128-n64-S128";
-  } else {
-    assert(TT.isArch32Bit() && "only RV32 and RV64 are currently supported");
-    return "e-m:e-p:32:32-i64:64-n32-S128";
+static std::string computeDataLayout(const Triple &TT, StringRef FS,
+                                     const TargetOptions &Options) {
+  assert((TT.isArch32Bit() || TT.isArch64Bit()) &&
+         "only RV32 and RV64 are currently supported");
+
+  StringRef IntegerTypes;
+  if (TT.isArch64Bit())
+    IntegerTypes = "-p:64:64-i64:64-i128:128-n64";
+  else
+    IntegerTypes = "-p:32:32-i64:64-n32";
+
+  StringRef CapTypes = "";
+  StringRef PurecapOptions = "";
+  if (FS.contains("+xcheri")) {
+    if (TT.isArch64Bit())
+      CapTypes = "-pf200:128:128:128:64";
+    else
+      CapTypes = "-pf200:64:64:64:32";
+
+    StringRef ABI = Options.MCOptions.getABIName();
+    if (ABI.startswith("il32pc64") || ABI.startswith("l64pc128"))
+      PurecapOptions = MCTargetOptions::cheriUsesCapabilityTable()
+                           ? "-A200-P200-G200"
+                           : "-A200-P200";
   }
+
+  return ("e-m:e" + CapTypes + IntegerTypes + "-S128" + PurecapOptions).str();
 }
 
 static Reloc::Model getEffectiveRelocModel(const Triple &TT,
@@ -53,12 +81,43 @@ RISCVTargetMachine::RISCVTargetMachine(const Target &T, const Triple &TT,
                                        Optional<Reloc::Model> RM,
                                        Optional<CodeModel::Model> CM,
                                        CodeGenOpt::Level OL, bool JIT)
-    : LLVMTargetMachine(T, computeDataLayout(TT), TT, CPU, FS, Options,
-                        getEffectiveRelocModel(TT, RM),
+    : LLVMTargetMachine(T, computeDataLayout(TT, FS, Options), TT, CPU,
+                        FS, Options, getEffectiveRelocModel(TT, RM),
                         getEffectiveCodeModel(CM, CodeModel::Small), OL),
-      TLOF(make_unique<RISCVELFTargetObjectFile>()),
-      Subtarget(TT, CPU, FS, Options.MCOptions.getABIName(), *this) {
+      TLOF(std::make_unique<RISCVELFTargetObjectFile>()) {
   initAsmInfo();
+
+  // RISC-V supports the MachineOutliner.
+  setMachineOutliner(true);
+}
+
+const RISCVSubtarget *
+RISCVTargetMachine::getSubtargetImpl(const Function &F) const {
+  Attribute CPUAttr = F.getFnAttribute("target-cpu");
+  Attribute FSAttr = F.getFnAttribute("target-features");
+
+  std::string CPU = !CPUAttr.hasAttribute(Attribute::None)
+                        ? CPUAttr.getValueAsString().str()
+                        : TargetCPU;
+  std::string FS = !FSAttr.hasAttribute(Attribute::None)
+                       ? FSAttr.getValueAsString().str()
+                       : TargetFS;
+  std::string Key = CPU + FS;
+  auto &I = SubtargetMap[Key];
+  if (!I) {
+    // This needs to be done before we create a new subtarget since any
+    // creation will depend on the TM and the code generation flags on the
+    // function that reside in TargetOptions.
+    resetTargetOptions(F);
+    I = std::make_unique<RISCVSubtarget>(TargetTriple, CPU, FS,
+                                         Options.MCOptions.getABIName(), *this);
+  }
+  return I.get();
+}
+
+TargetTransformInfo
+RISCVTargetMachine::getTargetTransformInfo(const Function &F) {
+  return TargetTransformInfo(RISCVTTIImpl(this, F));
 }
 
 namespace {
@@ -73,6 +132,10 @@ public:
 
   void addIRPasses() override;
   bool addInstSelector() override;
+  bool addIRTranslator() override;
+  bool addLegalizeMachineIR() override;
+  bool addRegBankSelect() override;
+  bool addGlobalInstructionSelect() override;
   void addPreEmitPass() override;
   void addPreEmitPass2() override;
   void addPreRegAlloc() override;
@@ -85,12 +148,33 @@ TargetPassConfig *RISCVTargetMachine::createPassConfig(PassManagerBase &PM) {
 
 void RISCVPassConfig::addIRPasses() {
   addPass(createAtomicExpandPass());
+  addPass(createCheriBoundAllocasPass());
   TargetPassConfig::addIRPasses();
 }
 
 bool RISCVPassConfig::addInstSelector() {
   addPass(createRISCVISelDag(getRISCVTargetMachine()));
 
+  return false;
+}
+
+bool RISCVPassConfig::addIRTranslator() {
+  addPass(new IRTranslator());
+  return false;
+}
+
+bool RISCVPassConfig::addLegalizeMachineIR() {
+  addPass(new Legalizer());
+  return false;
+}
+
+bool RISCVPassConfig::addRegBankSelect() {
+  addPass(new RegBankSelect());
+  return false;
+}
+
+bool RISCVPassConfig::addGlobalInstructionSelect() {
+  addPass(new InstructionSelect());
   return false;
 }
 

@@ -41,7 +41,7 @@ public:
                            unsigned FIOperandNum,
                            RegScavenger *RS = NULL) const override;
 
-  unsigned getFrameRegister(const MachineFunction &MF) const override;
+  Register getFrameRegister(const MachineFunction &MF) const override;
 
   const TargetRegisterClass *
   getPointerRegClass(const MachineFunction &MF,
@@ -50,10 +50,6 @@ public:
   /// Splits a 16-bit `DREGS` register into the lo/hi register pair.
   /// \param Reg A 16-bit register to split.
   void splitReg(unsigned Reg, unsigned &LoReg, unsigned &HiReg) const;
-
-  bool trackLivenessAfterRegAlloc(const MachineFunction &) const override {
-    return true;
-  }
 
   bool shouldCoalesce(MachineInstr *MI,
                       const TargetRegisterClass *SrcRC,

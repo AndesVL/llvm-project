@@ -80,6 +80,8 @@ memptr.end:                                       ; preds = %memptr.nonvirtual, 
 
 
 
+  ; OPT: cincoffset $c11, $c11, -[[#CAP_SIZE]]
+  ; OPT: csc     $c17, $zero, 0($c11)      # {{16|32}}-byte Folded Spill
   ; OPT: dsra    [[ADJ:\$[0-9]+]], $4, 1
   ; OPT: andi    [[ISVIRT:\$[0-9]+]], $4, 1
   ; OPT: beqz    [[ISVIRT]], .LBB0_2
@@ -89,7 +91,6 @@ memptr.end:                                       ; preds = %memptr.nonvirtual, 
   ; OPT: cgetaddr  [[VTABLE_OFFSET:\$1]], $c4
   ; OPT: clc     $c4, [[VTABLE_OFFSET]], 0([[VTABLE]])
   ; OPT: .LBB0_2:                                # %memptr.end
-  ; OPT: cincoffset $c11, $c11, -[[#CAP_SIZE]]
   ; OPT: cmove   $c12, $c4
   ; OPT: cjalr   $c12, $c17
   ; OPT: clc     $c17, $zero, 0($c11)      # {{16|32}}-byte Folded Reload
@@ -131,7 +132,7 @@ memptr.end:                                       ; preds = %memptr.nonvirtual, 
 ;   ret void
 ; }
 
-attributes #0 = { nounwind "correctly-rounded-divide-sqrt-fp-math"="false" "disable-tail-calls"="false" "less-precise-fpmad"="false" "no-frame-pointer-elim"="false" "no-infs-fp-math"="false" "no-jump-tables"="false" "no-nans-fp-math"="false" "no-signed-zeros-fp-math"="false" "no-trapping-math"="false" "stack-protector-buffer-size"="8" "target-cpu"="cheri" "target-features"="+cheri" "unsafe-fp-math"="false" "use-soft-float"="false" }
+attributes #0 = { nounwind }
 attributes #1 = { nounwind }
 
 !llvm.module.flags = !{!0}

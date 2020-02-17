@@ -23,6 +23,9 @@
 
 using namespace llvm;
 
+const DIExpression::FragmentInfo DebugVariable::DefaultFragment = {
+    std::numeric_limits<uint64_t>::max(), std::numeric_limits<uint64_t>::min()};
+
 DILocation::DILocation(LLVMContext &C, StorageType Storage, unsigned Line,
                        unsigned Column, ArrayRef<Metadata *> MDs,
                        bool ImplicitCode)
@@ -517,8 +520,8 @@ DICompileUnit *DICompileUnit::getImpl(
     unsigned EmissionKind, Metadata *EnumTypes, Metadata *RetainedTypes,
     Metadata *GlobalVariables, Metadata *ImportedEntities, Metadata *Macros,
     uint64_t DWOId, bool SplitDebugInlining, bool DebugInfoForProfiling,
-    unsigned NameTableKind, bool RangesBaseAddress, StorageType Storage,
-    bool ShouldCreate) {
+    unsigned NameTableKind, bool RangesBaseAddress, MDString *SysRoot,
+    StorageType Storage, bool ShouldCreate) {
   assert(Storage != Uniqued && "Cannot unique DICompileUnit");
   assert(isCanonical(Producer) && "Expected canonical MDString");
   assert(isCanonical(Flags) && "Expected canonical MDString");
@@ -527,7 +530,7 @@ DICompileUnit *DICompileUnit::getImpl(
   Metadata *Ops[] = {
       File,      Producer,      Flags,           SplitDebugFilename,
       EnumTypes, RetainedTypes, GlobalVariables, ImportedEntities,
-      Macros};
+      Macros,    SysRoot};
   return storeImpl(new (array_lengthof(Ops)) DICompileUnit(
                        Context, Storage, SourceLanguage, IsOptimized,
                        RuntimeVersion, EmissionKind, DWOId, SplitDebugInlining,
@@ -712,12 +715,12 @@ DICommonBlock *DICommonBlock::getImpl(LLVMContext &Context, Metadata *Scope,
 
 DIModule *DIModule::getImpl(LLVMContext &Context, Metadata *Scope,
                             MDString *Name, MDString *ConfigurationMacros,
-                            MDString *IncludePath, MDString *ISysRoot,
-                            StorageType Storage, bool ShouldCreate) {
+                            MDString *IncludePath, StorageType Storage,
+                            bool ShouldCreate) {
   assert(isCanonical(Name) && "Expected canonical MDString");
-  DEFINE_GETIMPL_LOOKUP(
-      DIModule, (Scope, Name, ConfigurationMacros, IncludePath, ISysRoot));
-  Metadata *Ops[] = {Scope, Name, ConfigurationMacros, IncludePath, ISysRoot};
+  DEFINE_GETIMPL_LOOKUP(DIModule,
+                        (Scope, Name, ConfigurationMacros, IncludePath));
+  Metadata *Ops[] = {Scope, Name, ConfigurationMacros, IncludePath};
   DEFINE_GETIMPL_STORE_NO_CONSTRUCTOR_ARGS(DIModule, Ops);
 }
 
@@ -828,13 +831,23 @@ DIExpression *DIExpression::getImpl(LLVMContext &Context,
 }
 
 unsigned DIExpression::ExprOperand::getSize() const {
-  switch (getOp()) {
+  uint64_t Op = getOp();
+
+  if (Op >= dwarf::DW_OP_breg0 && Op <= dwarf::DW_OP_breg31)
+    return 2;
+
+  switch (Op) {
   case dwarf::DW_OP_LLVM_convert:
   case dwarf::DW_OP_LLVM_fragment:
+  case dwarf::DW_OP_bregx:
     return 3;
   case dwarf::DW_OP_constu:
+  case dwarf::DW_OP_consts:
   case dwarf::DW_OP_deref_size:
   case dwarf::DW_OP_plus_uconst:
+  case dwarf::DW_OP_LLVM_tag_offset:
+  case dwarf::DW_OP_LLVM_entry_value:
+  case dwarf::DW_OP_regx:
     return 2;
   default:
     return 1;
@@ -847,8 +860,13 @@ bool DIExpression::isValid() const {
     if (I->get() + I->getSize() > E->get())
       return false;
 
+    uint64_t Op = I->getOp();
+    if ((Op >= dwarf::DW_OP_reg0 && Op <= dwarf::DW_OP_reg31) ||
+        (Op >= dwarf::DW_OP_breg0 && Op <= dwarf::DW_OP_breg31))
+      return true;
+
     // Check that the operand is valid.
-    switch (I->getOp()) {
+    switch (Op) {
     default:
       return false;
     case dwarf::DW_OP_LLVM_fragment:
@@ -875,7 +893,17 @@ bool DIExpression::isValid() const {
         return false;
       break;
     }
+    case dwarf::DW_OP_LLVM_entry_value: {
+      // An entry value operator must appear at the beginning and the number of
+      // operations it cover can currently only be 1, because we support only
+      // entry values of a simple register location. One reason for this is that
+      // we currently can't calculate the size of the resulting DWARF block for
+      // other expressions.
+      return I->get() == expr_op_begin()->get() && I->getArg(0) == 1 &&
+             getNumElements() == 2;
+    }
     case dwarf::DW_OP_LLVM_convert:
+    case dwarf::DW_OP_LLVM_tag_offset:
     case dwarf::DW_OP_constu:
     case dwarf::DW_OP_plus_uconst:
     case dwarf::DW_OP_plus:
@@ -895,6 +923,8 @@ bool DIExpression::isValid() const {
     case dwarf::DW_OP_lit0:
     case dwarf::DW_OP_not:
     case dwarf::DW_OP_dup:
+    case dwarf::DW_OP_regx:
+    case dwarf::DW_OP_bregx:
       break;
     }
   }
@@ -902,15 +932,43 @@ bool DIExpression::isValid() const {
 }
 
 bool DIExpression::isImplicit() const {
-  unsigned N = getNumElements();
-  if (isValid() && N > 0) {
-    switch (getElement(N-1)) {
-      case dwarf::DW_OP_stack_value: return true;
-      case dwarf::DW_OP_LLVM_fragment:
-        return N > 1 && getElement(N-2) == dwarf::DW_OP_stack_value;
-      default: break;
+  if (!isValid())
+    return false;
+
+  if (getNumElements() == 0)
+    return false;
+
+  for (const auto &It : expr_ops()) {
+    switch (It.getOp()) {
+    default:
+      break;
+    case dwarf::DW_OP_stack_value:
+    case dwarf::DW_OP_LLVM_tag_offset:
+      return true;
     }
   }
+
+  return false;
+}
+
+bool DIExpression::isComplex() const {
+  if (!isValid())
+    return false;
+
+  if (getNumElements() == 0)
+    return false;
+
+  // If there are any elements other than fragment or tag_offset, then some
+  // kind of complex computation occurs.
+  for (const auto &It : expr_ops()) {
+    switch (It.getOp()) {
+      case dwarf::DW_OP_LLVM_tag_offset:
+      case dwarf::DW_OP_LLVM_fragment:
+        continue;
+      default: return true;
+    }
+  }
+
   return false;
 }
 
@@ -963,6 +1021,8 @@ bool DIExpression::extractIfOffset(int64_t &Offset) const {
 
 const DIExpression *DIExpression::extractAddressClass(const DIExpression *Expr,
                                                       unsigned &AddrClass) {
+  // FIXME: This seems fragile. Nothing that verifies that these elements
+  // actually map to ops and not operands.
   const unsigned PatternSize = 4;
   if (Expr->Elements.size() >= PatternSize &&
       Expr->Elements[PatternSize - 4] == dwarf::DW_OP_constu &&
@@ -990,14 +1050,23 @@ DIExpression *DIExpression::prepend(const DIExpression *Expr, uint8_t Flags,
     Ops.push_back(dwarf::DW_OP_deref);
 
   bool StackValue = Flags & DIExpression::StackValue;
+  bool EntryValue = Flags & DIExpression::EntryValue;
 
-  return prependOpcodes(Expr, Ops, StackValue);
+  return prependOpcodes(Expr, Ops, StackValue, EntryValue);
 }
 
 DIExpression *DIExpression::prependOpcodes(const DIExpression *Expr,
                                            SmallVectorImpl<uint64_t> &Ops,
-                                           bool StackValue) {
+                                           bool StackValue,
+                                           bool EntryValue) {
   assert(Expr && "Can't prepend ops to this expression");
+
+  if (EntryValue) {
+    Ops.push_back(dwarf::DW_OP_LLVM_entry_value);
+    // Add size info needed for entry value expression.
+    // Add plus one for target register operand.
+    Ops.push_back(Expr->getNumElements() + 1);
+  }
 
   // If there are no ops to prepend, do not even add the DW_OP_stack_value.
   if (Ops.empty())
@@ -1082,10 +1151,14 @@ Optional<DIExpression *> DIExpression::createFragmentExpression(
     for (auto Op : Expr->expr_ops()) {
       switch (Op.getOp()) {
       default: break;
+      case dwarf::DW_OP_shr:
+      case dwarf::DW_OP_shra:
+      case dwarf::DW_OP_shl:
       case dwarf::DW_OP_plus:
+      case dwarf::DW_OP_plus_uconst:
       case dwarf::DW_OP_minus:
-        // We can't safely split arithmetic into multiple fragments because we
-        // can't express carry-over between fragments.
+        // We can't safely split arithmetic or shift operations into multiple
+        // fragments because we can't express carry-over between fragments.
         //
         // FIXME: We *could* preserve the lowest fragment of a constant offset
         // operation if the offset fits into SizeInBits.
@@ -1104,6 +1177,7 @@ Optional<DIExpression *> DIExpression::createFragmentExpression(
       Op.appendToVector(Ops);
     }
   }
+  assert(Expr && "Unknown DIExpression");
   Ops.push_back(dwarf::DW_OP_LLVM_fragment);
   Ops.push_back(OffsetInBits);
   Ops.push_back(SizeInBits);
@@ -1120,6 +1194,20 @@ bool DIExpression::isConstant() const {
   if (getNumElements() == 6 && getElement(3) != dwarf::DW_OP_LLVM_fragment)
     return false;
   return true;
+}
+
+DIExpression::ExtOps DIExpression::getExtOps(unsigned FromSize, unsigned ToSize,
+                                             bool Signed) {
+  dwarf::TypeKind TK = Signed ? dwarf::DW_ATE_signed : dwarf::DW_ATE_unsigned;
+  DIExpression::ExtOps Ops{{dwarf::DW_OP_LLVM_convert, FromSize, TK,
+                            dwarf::DW_OP_LLVM_convert, ToSize, TK}};
+  return Ops;
+}
+
+DIExpression *DIExpression::appendExt(const DIExpression *Expr,
+                                      unsigned FromSize, unsigned ToSize,
+                                      bool Signed) {
+  return appendToStack(Expr, getExtOps(FromSize, ToSize, Signed));
 }
 
 DIGlobalVariableExpression *

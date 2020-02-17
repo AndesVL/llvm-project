@@ -225,8 +225,6 @@ extern bool LargeCapTable;
       CapSealedGet,
       /// Legalised int_cheri_cap_subset_test
       CapSubsetTest,
-      /// Bitwise-and of capability address
-      CapAndAddr,
 
       // DSP shift nodes.
       SHLL_DSP,
@@ -332,11 +330,12 @@ extern bool LargeCapTable;
         unsigned &NumIntermediates, MVT &RegisterVT) const override;
 
     /// Return the correct alignment for the current calling convention.
-    unsigned getABIAlignmentForCallingConv(Type *ArgTy,
-                                           DataLayout DL) const override {
+    Align getABIAlignmentForCallingConv(Type *ArgTy,
+                                        DataLayout DL) const override {
+      const Align ABIAlign(DL.getABITypeAlignment(ArgTy));
       if (ArgTy->isVectorTy())
-        return std::min(DL.getABITypeAlignment(ArgTy), 8U);
-      return DL.getABITypeAlignment(ArgTy);
+        return std::min(ABIAlign, Align(8));
+      return ABIAlign;
     }
 
     ISD::NodeType getExtendForAtomicOps() const override {
@@ -366,6 +365,12 @@ extern bool LargeCapTable;
 
     SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
 
+    void computeKnownBitsForTargetNode(const SDValue Op,
+                                       KnownBits &Known,
+                                       const APInt &DemandedElts,
+                                       const SelectionDAG &DAG,
+                                       unsigned Depth = 0) const override;
+
     MachineBasicBlock *
     EmitInstrWithCustomInserter(MachineInstr &MI,
                                 MachineBasicBlock *MBB) const override;
@@ -375,8 +380,8 @@ extern bool LargeCapTable;
 
     void HandleByVal(CCState *, unsigned &, unsigned) const override;
 
-    unsigned getRegisterByName(const char* RegName, EVT VT,
-                               SelectionDAG &DAG) const override;
+    Register getRegisterByName(const char* RegName, LLT VT,
+                               const MachineFunction &MF) const override;
 
     /// If a physical register, this returns the register that receives the
     /// exception address on entry to an EH pad.
@@ -413,6 +418,10 @@ extern bool LargeCapTable;
     // Although we don't currently have a CSetAddr, our CheriExpandIntrinsics
     // pass handles the intrinsic so we want to keep the intrinsic as-is.
     bool hasCapabilitySetAddress() const override { return true; }
+
+    TailPaddingAmount
+    getTailPaddingForPreciseBounds(uint64_t Size) const override;
+    Align getAlignmentForPreciseBounds(uint64_t Size) const override;
 
     CCAssignFn *CCAssignFnForCall() const;
 
@@ -812,9 +821,11 @@ extern bool LargeCapTable;
 
     unsigned
     getInlineAsmMemConstraint(StringRef ConstraintCode) const override {
+      if (ConstraintCode == "o")
+        return InlineAsm::Constraint_o;
       if (ConstraintCode == "R")
         return InlineAsm::Constraint_R;
-      else if (ConstraintCode == "ZC")
+      if (ConstraintCode == "ZC")
         return InlineAsm::Constraint_ZC;
       return TargetLowering::getInlineAsmMemConstraint(ConstraintCode);
     }

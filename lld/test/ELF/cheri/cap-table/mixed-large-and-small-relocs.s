@@ -6,16 +6,15 @@
 # RUN: ld.lld %t.o -o %t.exe
 # RUN: llvm-objdump --cap-relocs -D -t %t.exe | FileCheck %s -check-prefix EXE
 # check that symbols with small immediates come first:
+# EXE-LABEL: SYMBOL TABLE
+# EXE: [[MXCTB000_ADDR:[0-9a-f]+]] l     O .captable		 00000010 sym_mxcaptable000@CAPTABLE
+# EXE: [[SMALL000_ADDR:[0-9a-f]+]] l     O .captable		 00000010 sym_small000@CAPTABLE
+# EXE-LABEL: CAPABILITY RELOCATION RECORDS:
+# EXE-NEXT: 0x[[SMALL000_ADDR]]	Base: sym_small000 (0x000000000005ead8)	Offset: 0x0000000000000000	Length: 0x0000000000000001	Permissions: 0x00000000
+# EXE:      0x[[MXCTB000_ADDR]]	Base: sym_mxcaptable000 (0x000000000005e6f0)	Offset: 0x0000000000000000	Length: 0x0000000000000001	Permissions: 0x00000000
 # EXE-LABEL: Disassembly of section .captable:
 # EXE-EMPTY:
 # EXE-NEXT: sym_small000@CAPTABLE:
-# EXE-LABEL: CAPABILITY RELOCATION RECORDS:
-# EXE-NEXT: 0x0000000000040000	Base: sym_small000 (0x00000000000503e8)	Offset: 0x0000000000000000	Length: 0x0000000000000001	Permissions: 0x00000000
-# EXE:      0x0000000000043e80	Base: sym_mxcaptable000 (0x0000000000050000)	Offset: 0x0000000000000000	Length: 0x0000000000000001	Permissions: 0x00000000
-# EXE-LABEL: SYMBOL TABLE
-# EXE: 0000000000043e80 l     O .captable		 00000010 sym_mxcaptable000@CAPTABLE
-# EXE: 0000000000040000 l     O .captable		 00000010 sym_small000@CAPTABLE
-
 
 # But if there are too many small relocs there is nothing we can do
 # RUN: not ld.lld %t-bad.o -o %t.exe 2>&1 | FileCheck %s -check-prefix ERR
