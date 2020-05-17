@@ -316,6 +316,10 @@ def CUninit  : CheriFmt2Op<0x1b, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
                               "cuninit\t$r1, $r2",
                               [(set CheriOpnd:$r1, (int_cheri_cap_uninit CheriOpnd:$r2))]>;
 
+def CShrink  : CheriFmt2Op<0x1c, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
+                              "cshrink\t$r1, $r2",
+                              [(set CheriOpnd:$r1, (int_cheri_cap_length_set CheriOpnd:$r2))]>;
+
 // CRoundRepresentableLength (a.k.a. CRoundArchitecturalPrecision)
 def CRRL : CheriFmt2Op<0x10, (outs GPR64Opnd:$r1), (ins GPR64Opnd:$r2),
                        "croundrepresentablelength\t$r1, $r2",
