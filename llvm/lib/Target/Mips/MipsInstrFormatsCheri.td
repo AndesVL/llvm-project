@@ -167,6 +167,24 @@ class CheriFmtCLS<bits<6> op, dag outs, dag ins, string asmstr,
   let hasSideEffects = 0;
 }
 
+// Uninit Store capabilities
+class CheriFmtUCS<bits<6> op, dag outs, dag ins, string asmstr,
+                list<dag> pattern> :
+  MipsInst<outs, ins, asmstr, pattern, NoItinerary, FrmOther>, Sched<[]>
+{
+  bits<5>  cd;
+  bits<5>  cs;
+  bits<5>  cb;
+  bits<11> offset;
+
+  let Opcode = op;
+  let Inst{25-21} = cd;
+  let Inst{20-16} = cs;
+  let Inst{15-11} = cb;
+  let Inst{10-0}  = offset;
+  let hasSideEffects = 0;
+}
+
 class CheriFmtCLS_BigImm<bits<6> op, dag outs, dag ins, string asmstr,
                          list<dag> pattern> :
   MipsInst<outs, ins, asmstr, pattern, NoItinerary, FrmOther>, Sched<[]>

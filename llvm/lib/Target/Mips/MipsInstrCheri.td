@@ -494,9 +494,11 @@ let Predicates = [IsCHERI], DecoderNamespace="CHERI" in {
 def STORECAP : CheriFmtCLS<0x3e, (outs), (ins CheriOpnd:$cs, GPR64Opnd:$rt, simm11s4:$offset, CheriOpnd0IsDDC:$cb),
                          "csc\t$cs, ${rt}, ${offset}(${cb})",
                          [(store CheriOpnd:$cs, (add (add GPR64Opnd:$rt, (ptrtoint CheriOpnd0IsDDC:$cb)), (i64 simm11s4Pattern:$offset)))]>;
-def UNINITSTORECAP : CheriFmtCLS<0x3c, (outs CheriOpnd:$ct), (ins CheriOpnd:$cs, simm11s4:$offset, CheriOpnd0IsDDC:$cb),
+
+def UNINITSTORECAP : CheriFmtUCS<0x3d, (outs CheriOpnd:$ct), (ins CheriOpnd:$cs, simm11s4:$offset, CheriOpnd:$cb),
                          "ucsc\t$ct, $cs, ${offset}(${cb})",
-                         [(set CheriOpnd:$ct, (store CheriOpnd:$cs, (add (ptrtoint CheriOpnd0IsDDC:$cb), (i64 simm11s4Pattern:$offset))))]>;
+                         [(set CheriOpnd:$ct, (store CheriOpnd:$cs, (add (ptrtoint CheriOpnd:$cb), (i64 simm11s4Pattern:$offset))))]>;
+
 // new experimental 16bit immediate CLC (not sure if needed but added for symmetry with clc)
 // Reuses the MDMX/MSA opcodes
 def STORECAP_BigImm : CheriFmtCLS_BigImm<0x1E, (outs), (ins CheriOpnd:$cs, simm16s4:$offset, CheriOpnd0IsDDC:$cb),
@@ -509,6 +511,9 @@ def : Pat<(store CheriOpnd:$cs, CheriOpnd:$cb),
           (STORECAP CheriOpnd:$cs, ZERO_64, (i64 0), $cb)>;
 def : Pat<(store CheriOpnd:$cs, GPR64Opnd:$rt),
           (STORECAP CheriOpnd:$cs, GPR64Opnd:$rt, (i64 0), DDC)>;
+
+def : Pat<(store CheriOpnd:$cs, CheriOpnd:$cb),
+          (UNINITSTORECAP CheriOpnd:$cs, (i64 0), CheriOpnd:$cb)>;
 
 // Load a capability
 let Predicates = [IsCHERI] in {
