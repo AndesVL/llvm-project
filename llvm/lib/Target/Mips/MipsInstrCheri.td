@@ -278,6 +278,8 @@ let TwoOperandAliasConstraint = "$cd = $cb" in {
     [(set CheriOpnd:$cd, (ptradd CheriOpnd:$cb, (i64 simm11s0Pattern: $imm)))]>;
   def CSetBoundsImm : CheriFmtCSetImm<0x14, uimm11s0, "csetbounds",
     [(set CheriOpnd:$cd, (int_cheri_cap_bounds_set CheriOpnd:$cb, (i64 uimm11s0Pattern: $imm)))]>;
+  def CShrinkImm : CheriFmtCSetImm<0x17, uimm11s0, "cshrink",
+    [(set CheriOpnd:$cd, (int_cheri_cap_shrink CheriOpnd:$cb, (i64 uimm11s0Pattern: $imm)))]>;
 }
 } // end of isReMaterializable = 1, isAsCheapAsAMove = 1 block
 
@@ -287,10 +289,14 @@ def : InstAlias<"csetboundsimm $dst, $src, $imm",
                 (CSetBoundsImm CheriOpnd:$dst, CheriOpnd:$src, uimm11s0:$imm), 0>;
 def : InstAlias<"cincoffsetimm $dst, $src, $imm",
                 (CIncOffsetImm CheriOpnd:$dst, CheriOpnd:$src, simm11s0:$imm), 0>;
+def : InstAlias<"cshrinkimm $dst, $src, $imm",
+                (CShrinkImm CheriOpnd:$dst, CheriOpnd:$src, simm11s0:$imm), 0>;
 def : InstAlias<"csetboundsimm $dst, $imm",
                 (CSetBoundsImm CheriOpnd:$dst, CheriOpnd:$dst, uimm11s0:$imm), 0>;
 def : InstAlias<"cincoffsetimm $dst, $imm",
                 (CIncOffsetImm CheriOpnd:$dst, CheriOpnd:$dst, simm11s0:$imm), 0>;
+def : InstAlias<"cshrinkimm $dst, $imm",
+                (CShrinkImm CheriOpnd:$dst, CheriOpnd:$dst, simm11s0:$imm), 0>;
 // CAssertInBounds pseudo
 def : InstAlias<"cassertinbounds $dst, $imm",
                 (CSetBoundsImm CNULL, CheriOpnd:$dst, uimm11s0:$imm), 1>;
@@ -316,9 +322,9 @@ def CUninit  : CheriFmt2Op<0x1b, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
                               "cuninit\t$r1, $r2",
                               [(set CheriOpnd:$r1, (int_cheri_cap_uninit CheriOpnd:$r2))]>;
 
-def CShrink  : CheriFmt2Op<0x1c, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
-                              "cshrink\t$r1, $r2",
-                              [(set CheriOpnd:$r1, (int_cheri_cap_length_set CheriOpnd:$r2))]>;
+def CShrink  : CheriFmt3Op<0x2c, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2, GPR64Opnd:$r3),
+                              "cshrink\t$r1, $r2, $r3",
+                              [(set CheriOpnd:$r1, (int_cheri_cap_shrink CheriOpnd:$r2, GPR64Opnd:$r3))]>;
 
 // CRoundRepresentableLength (a.k.a. CRoundArchitecturalPrecision)
 def CRRL : CheriFmt2Op<0x10, (outs GPR64Opnd:$r1), (ins GPR64Opnd:$r2),
