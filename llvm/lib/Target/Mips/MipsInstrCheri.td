@@ -634,14 +634,14 @@ let isCodeGenOnly=1 in {
 defm CAPSTORE64     : StoreViaCapScaled<3, 0, "csd", GPR64Opnd, store, simm8s3, simm8s3Pattern>;
 
 defm UCAPSTORE8      : UStoreViaCap<0, 0, "ucsb", GPR64Opnd, truncstorei8>;
-defm UCAPSTORE16     : UStoreViaCapScaled<1, 0, "ucsh", GPR64Opnd, truncstorei16, simm8s1, simm8s1Pattern>;
-defm UCAPSTORE32     : UStoreViaCapScaled<2, 0, "ucsw", GPR32Opnd, store, simm8s2, simm8s2Pattern>;
+defm UCAPSTORE16     : UStoreViaCap<1, 0, "ucsh", GPR64Opnd, truncstorei16>;
+defm UCAPSTORE32     : UStoreViaCap<2, 0, "ucsw", GPR32Opnd, store>;
 let isCodeGenOnly=1 in {
   defm UCAPSTORE832      : UStoreViaCap<0, 0, "ucsb", GPR32Opnd, truncstorei8>;
-  defm UCAPSTORE1632     : UStoreViaCapScaled<1, 0, "ucsh", GPR32Opnd, truncstorei16, simm8s1, simm8s1Pattern>;
-  defm UCAPSTORE3264     : UStoreViaCapScaled<2, 0, "ucsw", GPR64Opnd, truncstorei32, simm8s2, simm8s2Pattern>;
+  defm UCAPSTORE1632     : UStoreViaCap<1, 0, "ucsh", GPR32Opnd, truncstorei16>;
+  defm UCAPSTORE3264     : UStoreViaCap<2, 0, "ucsw", GPR64Opnd, truncstorei32>;
 }
-defm UCAPSTORE64     : UStoreViaCapScaled<3, 0, "ucsd", GPR64Opnd, store, simm8s3, simm8s3Pattern>;
+defm UCAPSTORE64     : UStoreViaCap<3, 0, "ucsd", GPR64Opnd, store>;
 
 // TODO: replace these by CReadHwr
 def : Pat<(int_cheri_ddc_get), (CReadHwr CAPHWR0)>;
