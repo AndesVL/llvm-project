@@ -501,9 +501,9 @@ def STORECAP : CheriFmtCLS<0x3e, (outs), (ins CheriOpnd:$cs, GPR64Opnd:$rt, simm
                          "csc\t$cs, ${rt}, ${offset}(${cb})",
                          [(store CheriOpnd:$cs, (add (add GPR64Opnd:$rt, (ptrtoint CheriOpnd0IsDDC:$cb)), (i64 simm11s4Pattern:$offset)))]>;
 
-def UNINITSTORECAP : CheriFmtUCS<0x3d, (outs CheriOpnd:$ct), (ins CheriOpnd:$cs, simm11s4:$offset, CheriOpnd:$cb),
+def UNINITSTORECAP : CheriFmtUCS<0x3d, (outs CheriOpnd:$ct), (ins CheriOpnd:$cs, simm8:$offset, CheriOpnd:$cb),
                          "ucsc\t$ct, $cs, ${offset}(${cb})",
-                         [(set CheriOpnd:$ct, (store CheriOpnd:$cs, (add (ptrtoint CheriOpnd:$cb), (i64 simm11s4Pattern:$offset))))]>;
+                         [(set CheriOpnd:$ct, (store CheriOpnd:$cs, (add (ptrtoint CheriOpnd:$cb), (i64 simm8Pattern:$offset))))]>;
 
 // new experimental 16bit immediate CLC (not sure if needed but added for symmetry with clc)
 // Reuses the MDMX/MSA opcodes
