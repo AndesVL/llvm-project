@@ -19,11 +19,11 @@ def int_cheri_cap_shrink:
 def int_cheri_cap_uninit_get :
   Intrinsic<[llvm_anyint_ty],
             [llvm_fatptr_ty],
-            [IntrNoMem]>;
+            [IntrNoMem, IntrWillReturn]>;
 def int_cheri_cap_uninit :
   Intrinsic<[llvm_fatptr_ty],
             [llvm_fatptr_ty],
-            [IntrNoMem]>;
+            [IntrNoMem, IntrWillReturn]>;
 def int_cheri_cap_length_get :
   Intrinsic<[llvm_anyint_ty],
             [llvm_fatptr_ty],
