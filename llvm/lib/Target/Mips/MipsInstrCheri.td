@@ -574,10 +574,10 @@ multiclass StoreViaCap0<Instruction Op, RegisterOperand RC, PatFrag storeType> {
 
 multiclass UStoreViaCapScaled<bits<2> t, bit e, string instr_asm, RegisterOperand RC, PatFrag storeType, Operand simm, PatFrag immfrag> {
   def #NAME# : CheriFmtUCSX<t, e,
-                             (outs CheriOpnd:$ct),
+                             (outs CheriOpnd:$cd),
                              (ins RC:$rs, simm:$offset, CheriOpnd0IsDDC:$cb),
-                             !strconcat(instr_asm, "\t$ct, ${rs}, ${offset}(${cb})"),
-                           [(set CheriOpnd:$ct, (storeType (CapRegType (ptradd CheriOpnd0IsDDC:$cb, (i64 immfrag:$offset))), RC:$rs))]>;
+                             !strconcat(instr_asm, "\t$cd, ${rs}, ${offset}(${cb})"),
+                           [(set CheriOpnd:$cd, (storeType (CapRegType (ptradd CheriOpnd0IsDDC:$cb, (i64 immfrag:$offset))), RC:$rs))]>;
 }
 multiclass UStoreViaCap<bits<2> t, bit e, string instr_asm, RegisterOperand RC, PatFrag storeType> :
   UStoreViaCapScaled<t, e, instr_asm, RC, storeType, simm8, immSExt8>;
