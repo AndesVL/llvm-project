@@ -322,6 +322,10 @@ def CUninit  : CheriFmt2Op<0x1b, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
                               "cuninit\t$r1, $r2",
                               [(set CheriOpnd:$r1, (int_cheri_cap_uninit CheriOpnd:$r2))]>;
 
+def CDropUninit  : CheriFmt2Op<0x1c, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2),
+                              "cdropuninit\t$r1, $r2",
+                              [(set CheriOpnd:$r1, (int_cheri_cap_drop_uninit CheriOpnd:$r2))]>;
+
 def CShrink  : CheriFmt3Op<0x2c, (outs CheriOpnd:$r1), (ins CheriOpnd:$r2, GPR64Opnd:$r3),
                               "cshrink\t$r1, $r2, $r3",
                               [(set CheriOpnd:$r1, (int_cheri_cap_shrink CheriOpnd:$r2, GPR64Opnd:$r3))]>;
