@@ -1108,3 +1108,4 @@ if (LLVM_INCLUDE_UTILS AND LLVM_INCLUDE_TOOLS)
 endif()
 
 process_llvm_pass_plugins()
+target_link_libraries(LLVMSupport)

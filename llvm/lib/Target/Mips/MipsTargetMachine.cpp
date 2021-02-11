@@ -351,6 +351,7 @@ void MipsPassConfig::addPreRegAlloc() {
     if (getOptLevel() != CodeGenOpt::Level::None)
       addPass(&DeadMachineInstructionElimID);
     addPass(createCheri128FailHardPass());
+    addPass(createUStorePass(getMipsTargetMachine()));
   }
 }
 

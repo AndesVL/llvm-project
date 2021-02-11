@@ -46,6 +46,7 @@ namespace llvm {
 
   MachineFunctionPass *createCheriAddressingModeFolder();
   MachineFunctionPass *createCheri128FailHardPass();
+  MachineFunctionPass *createUStorePass(const MipsTargetMachine &);
   InstructionSelector *createMipsInstructionSelector(const MipsTargetMachine &,
                                                      MipsSubtarget &,
                                                      MipsRegisterBankInfo &);
