@@ -73,18 +73,15 @@ public:
       for (auto I = MBB.begin(); I != MBB.end(); ++I) {
         MachineInstr & MI = *I;
         unsigned int UOpc = uStoreEquivalentOpcode(MI);
-         outs() << MI;
         if(UOpc) {
           IsStoreReplaced = true;
           MachineInstr *CalcOffsetInst = newStoreOffset(MI, I, MBB);
           MachineInstr *UStoreInst = newUninitializedStore(MI, I, UOpc, MBB);
           I = MBB.erase(MI);
           I--;
-          outs() << "replaced with:\n" << "\t\t\t" << *CalcOffsetInst << "\n\t\t\t" << *UStoreInst;
         }
       }
     }
-    outs() << "done!";
     return IsStoreReplaced;
   }
 };
