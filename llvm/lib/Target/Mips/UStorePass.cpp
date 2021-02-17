@@ -36,18 +36,19 @@ unsigned int uStoreEquivalentOpcode(MachineInstr &MI) {
 MachineInstr* newUninitializedStore(MachineInstr &OldMi, MachineBasicBlock::iterator I, unsigned int Opc, MachineBasicBlock &MBB) {
   const TargetInstrInfo *TII = MBB.getParent()->getSubtarget().getInstrInfo();
   MachineInstr* MI = BuildMI(MBB, I, DebugLoc(), TII->get(Opc))
-                      .add(OldMi.getOperand(0))
-                      .add(OldMi.getOperand(2))
-                      .add(OldMi.getOperand(0));
+                         .add(OldMi.getOperand(3)) // cb     (hardcoded operand mapping, see tablegen)
+                         .add(OldMi.getOperand(2)) // offset
+                         .add(OldMi.getOperand(0)) // rs
+                         .add(OldMi.getOperand(3)); // cb
   return MI;
 }
 
 MachineInstr* newStoreOffset(MachineInstr &OldMi, MachineBasicBlock::iterator I,  MachineBasicBlock &MBB) {
   const TargetInstrInfo *TII = MBB.getParent()->getSubtarget().getInstrInfo();
   MachineInstr* MI = BuildMI(MBB, I, DebugLoc(), TII->get(Mips::CIncOffset))
-                      .add(OldMi.getOperand(0))
-                      .add(OldMi.getOperand(0))
-                      .add(OldMi.getOperand(1));
+                      .add(OldMi.getOperand(1)) // rt    (hardcoded operand mapping, see tablegen)
+                      .add(OldMi.getOperand(3)) // cb
+                      .add(OldMi.getOperand(3)); // cb
   return MI;
 }
 
@@ -75,8 +76,8 @@ public:
         unsigned int UOpc = uStoreEquivalentOpcode(MI);
         if(UOpc) {
           IsStoreReplaced = true;
-          MachineInstr *CalcOffsetInst = newStoreOffset(MI, I, MBB);
-          MachineInstr *UStoreInst = newUninitializedStore(MI, I, UOpc, MBB);
+          newStoreOffset(MI, I, MBB);
+          newUninitializedStore(MI, I, UOpc, MBB);
           I = MBB.erase(MI);
           I--;
         }
