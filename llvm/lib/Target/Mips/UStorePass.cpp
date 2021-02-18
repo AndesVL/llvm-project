@@ -37,8 +37,8 @@ MachineInstr* newUninitializedStore(MachineInstr &OldMi, MachineBasicBlock::iter
   const TargetInstrInfo *TII = MBB.getParent()->getSubtarget().getInstrInfo();
   MachineInstr* MI = BuildMI(MBB, I, DebugLoc(), TII->get(Opc))
                          .add(OldMi.getOperand(3)) // cb     (hardcoded operand mapping, see tablegen)
-                         .add(OldMi.getOperand(2)) // offset
                          .add(OldMi.getOperand(0)) // rs
+                         .add(OldMi.getOperand(2)) // offset
                          .add(OldMi.getOperand(3)); // cb
   return MI;
 }
@@ -46,10 +46,20 @@ MachineInstr* newUninitializedStore(MachineInstr &OldMi, MachineBasicBlock::iter
 MachineInstr* newStoreOffset(MachineInstr &OldMi, MachineBasicBlock::iterator I,  MachineBasicBlock &MBB) {
   const TargetInstrInfo *TII = MBB.getParent()->getSubtarget().getInstrInfo();
   MachineInstr* MI = BuildMI(MBB, I, DebugLoc(), TII->get(Mips::CIncOffset))
-                      .add(OldMi.getOperand(1)) // rt    (hardcoded operand mapping, see tablegen)
+                      .add(OldMi.getOperand(3)) // cb  (hardcoded operand mapping, see tablegen)
                       .add(OldMi.getOperand(3)) // cb
-                      .add(OldMi.getOperand(3)); // cb
+                      .add(OldMi.getOperand(1)); // rt
+
+
   return MI;
+}
+
+bool isStackStore(MachineInstr &OldMi) {
+  // of the form csw rs $zero 16(cb)
+    MachineOperand Offset = OldMi.getOperand(2);
+    Register Zero = OldMi.getOperand(1).getReg(); // rt
+    Register Stack = OldMi.getOperand(3).getReg(); // cb
+    return Offset.getImm() == 16 && Zero == Mips::ZERO && Stack == Mips::C11;
 }
 
 namespace {
@@ -76,7 +86,9 @@ public:
         unsigned int UOpc = uStoreEquivalentOpcode(MI);
         if(UOpc) {
           IsStoreReplaced = true;
-          newStoreOffset(MI, I, MBB);
+          if(!isStackStore(MI)) {
+            newStoreOffset(MI, I, MBB);
+          };
           newUninitializedStore(MI, I, UOpc, MBB);
           I = MBB.erase(MI);
           I--;
